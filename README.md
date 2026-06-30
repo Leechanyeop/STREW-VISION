@@ -1,6 +1,5 @@
 <div align="center">
 
-<img src="docs/images/logo.png" width="320"/>
 
 # STREW VISION
 
