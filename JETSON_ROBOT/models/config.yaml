@@ -1,0 +1,3 @@
+model: best.pt
+input_size: 640
+confidence: 0.25

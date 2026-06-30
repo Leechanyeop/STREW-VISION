@@ -1,0 +1,13 @@
+cd ~
+# Arducam MIPI 카메라 설치 스크립트 다운로드
+wget https://github.com/ArduCAM/MIPI_Camera/releases/download/v0.0.3/install_full.sh
+chmod +x install_full.sh
+
+# imx708 드라이버 지정 설치
+./install_full.sh -m imx708
+
+# 비디오 장치 확인 (/dev/video0 등이 생성되어야 합니다)
+ls /dev/video*
+
+# v4l2 툴로 카메라 정보 확인
+v4l2-ctl -d /dev/video0 --info

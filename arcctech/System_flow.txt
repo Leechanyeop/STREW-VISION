@@ -1,0 +1,468 @@
+# 스마트팜 로봇 시스템 데이터 흐름 및 DB 연계 구조
+
+## 시스템 동작 개요
+
+본 시스템은 **Jetson Nano**를 중심으로 센서 데이터 수집, AI 분석, 관리자 승인, 로봇 제어 및 결과 저장을 수행하며, 모든 과정은 데이터베이스를 중심으로 연결된다.
+
+---
+
+# 1. 시스템 시작
+
+시스템이 실행되면 먼저 로봇의 현재 상태를 확인한다.
+
+만약 로봇이 비상정지(ESTOP) 상태이거나 오류가 발생한 경우에는
+
+```
+system_events
+```
+
+테이블에 이벤트를 기록하고 시스템을 대기 상태로 전환한다.
+
+정상이라면 다음 단계로 진행한다.
+
+---
+
+# 2. 작업 대상 셀 조회
+
+현재 활성화되어 있는 화분(Cell)을
+
+```
+cells
+```
+
+테이블에서 조회한다.
+
+예)
+
+```
+cell_id
+
+1
+2
+3
+4
+```
+
+이 목록을 기준으로 로봇은 순차적으로 작업을 수행한다.
+
+---
+
+# 3. 로봇 이동
+
+현재 작업할 Cell이 결정되면
+
+```
+robot_tasks
+```
+
+테이블에 새로운 작업(Task)이 생성된다.
+
+예)
+
+```
+task_name = OBSERVE
+
+state_machine = MOVE
+
+robot_status = READY
+```
+
+Jetson Nano는 이 Task를 Arduino Mega로 전달한다.
+
+Arduino는 해당 Cell까지 이동을 수행한다.
+
+---
+
+# 4. 이동 결과
+
+이동이 완료되면
+
+Arduino는
+
+```
+robot_feedback
+```
+
+테이블에
+
+```
+robot_status
+
+progress_rate
+
+reported_at
+```
+
+등을 저장한다.
+
+만약 이동 실패라면
+
+```
+system_events
+```
+
+에 오류를 저장하고 작업을 종료한다.
+
+---
+
+# 5. 환경 센서 측정
+
+로봇이 해당 Cell에 도착하면
+
+ESP32 또는 Arduino에서
+
+* 온도
+* 습도
+* 수액량
+
+을 측정한다.
+
+측정값은
+
+```
+sensor_logs
+```
+
+테이블에 저장된다.
+
+예)
+
+```
+temperature
+
+humidity
+
+sap_amount_ml
+
+measured_at
+```
+
+---
+
+# 6. 임계값 비교
+
+Jetson은
+
+```
+thresholds
+```
+
+테이블을 조회하여
+
+각 센서의 허용 범위를 확인한다.
+
+예)
+
+```
+temperature
+
+18~28℃
+
+humidity
+
+70~85%
+```
+
+센서값이 범위를 벗어나면
+
+```
+sensor_logs.env_warning
+
+=
+
+WARNING
+```
+
+로 저장된다.
+
+동시에
+
+```
+system_events
+```
+
+에도 환경 이상 이벤트를 기록한다.
+
+---
+
+# 7. AI 분석
+
+센서 데이터와 카메라 이미지를 기반으로
+
+YOLO 및 AI 모델이 분석을 수행한다.
+
+분석 결과는
+
+```
+ai_readings
+```
+
+테이블에 저장된다.
+
+예)
+
+```
+disease_name
+
+risk_level
+
+recommended_task
+
+disease_probability
+```
+
+또한
+
+```
+sensor_log_id
+```
+
+를 저장하여
+
+어떤 센서 데이터 기반으로 분석했는지 연결한다.
+
+---
+
+# 8. 위험도 판단
+
+AI가
+
+```
+risk_level
+```
+
+을 결정한다.
+
+예)
+
+```
+NORMAL
+
+WARNING
+
+DANGER
+```
+
+NORMAL이면
+
+추천 작업을
+
+```
+NONE
+```
+
+으로 저장하고
+
+다음 Cell로 이동한다.
+
+---
+
+# 9. 관리자 승인
+
+WARNING 또는 DANGER라면
+
+```
+approvals
+```
+
+테이블에
+
+새 승인 요청이 생성된다.
+
+```
+approval_status
+
+=
+
+PENDING
+```
+
+관리자는
+
+APPROVED
+
+또는
+
+REJECTED
+
+를 선택한다.
+
+---
+
+# 10. 작업 생성
+
+승인이 완료되면
+
+```
+robot_tasks
+```
+
+에 새로운 작업이 생성된다.
+
+예)
+
+```
+task_name
+
+NUTRITION
+
+또는
+
+OBSERVE
+```
+
+이 Task는 Jetson Nano가 Arduino Mega로 전송한다.
+
+---
+
+# 11. 로봇 작업 수행
+
+Arduino는
+
+명령에 따라
+
+* 영양제 공급
+* 추가 촬영
+* 위치 이동
+
+등을 수행한다.
+
+작업 중에는
+
+```
+progress_rate
+```
+
+를 지속적으로 갱신한다.
+
+모든 진행 상황은
+
+```
+robot_feedback
+```
+
+테이블에 저장된다.
+
+---
+
+# 12. 작업 종료
+
+작업이 완료되면
+
+```
+robot_tasks
+
+completed_at
+```
+
+이 기록된다.
+
+또한
+
+```
+robot_feedback
+
+robot_status = COMPLETE
+```
+
+로 변경된다.
+
+---
+
+# 13. 다음 Cell 이동
+
+현재 Cell 작업이 끝나면
+
+다음 Cell 번호를 조회한다.
+
+```
+1
+
+↓
+
+2
+
+↓
+
+3
+
+↓
+
+4
+```
+
+모든 Cell을 반복 수행한다.
+
+---
+
+# 14. 순회 종료
+
+1~4번 Cell이 모두 완료되면
+
+```
+system_events
+```
+
+에
+
+순회 완료 로그를 저장한다.
+
+예)
+
+```
+SCAN COMPLETE
+
+ALL CELL FINISHED
+```
+
+이후 시스템은 다음 측정 주기까지 대기하며
+
+다시
+
+```
+cells
+```
+
+테이블을 조회하여
+
+동일한 순서를 반복한다.
+
+---
+
+# 전체 데이터 흐름
+
+```
+cells
+    │
+    ▼
+robot_tasks
+    │
+    ▼
+Arduino Mega
+    │
+    ▼
+robot_feedback
+    │
+    ▼
+sensor_logs
+    │
+    ▼
+thresholds
+    │
+    ▼
+ai_readings
+    │
+    ▼
+approvals
+    │
+    ▼
+robot_tasks (치료 작업 생성)
+    │
+    ▼
+robot_feedback
+    │
+    ▼
+system_events
+```
+
+이 구조를 통해 하나의 Cell은 **작업 생성 → 이동 → 센서 측정 → AI 분석 → 승인 → 작업 수행 → 결과 저장 → 로그 기록**의 전체 생명주기를 갖게 되며, 모든 데이터는 관계형 데이터베이스를 통해 추적 가능하도록 설계된다.

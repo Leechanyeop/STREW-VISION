@@ -4,9 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-WorkingDirectory=/home/jetson/STREW_VISION/JETSON_ROBOT
-EnvironmentFile=/home/jetson/STREW_VISION/JETSON_ROBOT/.env
-ExecStart=/home/jetson/STREW_VISION/JETSON_ROBOT/.venv/bin/python -m strew_robot.main
+WorkingDirectory=/home/jetson/STREW_VISION/strew-jetson
+EnvironmentFile=/home/jetson/STREW_VISION/strew-jetson/.env
+ExecStart=/home/jetson/STREW_VISION/strew-jetson/.venv/bin/python -m main
 Restart=always
 RestartSec=3
 User=jetson

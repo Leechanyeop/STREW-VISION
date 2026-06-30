@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>관리자 승인 검토창</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<h1>관리자 승인 검토창</h1>
+<nav><a href="/">대시보드</a><a href="/approvals">승인 검토창</a></nav>
+<table>
+<thead><tr><th>ID</th><th>셀</th><th>AI MODE</th><th>판독</th><th>확률</th><th>상태</th><th>메시지</th><th>작업</th></tr></thead>
+<tbody>
+{% for a in approvals %}
+<tr>
+<td>{{ a.id }}</td><td>{{ a.cell_id }}</td><td>{{ a.ai_mode }}</td><td>{{ a.disease_name }}</td><td>{{ a.disease_probability }}%</td><td>{{ a.approval_status }}</td><td>{{ a.review_message }}</td>
+<td>
+{% if a.approval_status == 'PENDING' %}
+<form action="/approval/{{ a.id }}/approve" method="post"><input name="approved_by" value="admin"><button>승인</button></form>
+<form action="/approval/{{ a.id }}/reject" method="post"><input name="approved_by" value="admin"><button class="secondary">반려</button></form>
+{% else %}-{% endif %}
+</td>
+</tr>
+{% endfor %}
+</tbody></table>
+</body></html>

@@ -1,0 +1,17 @@
+{
+  "name": "strew-vision-monitoring",
+  "version": "1.0.0",
+  "private": true,
+  "description": "STREW vision recognition and farm environment monitoring dashboard",
+  "type": "module",
+  "scripts": {
+    "init-db": "node server/init-db.js",
+    "api": "node server/index.js",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>AI 영농 대시보드</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<h1>AI 영농 대시보드</h1>
+<nav><a href="/">대시보드</a><a href="/approvals">승인 검토창</a></nav>
+<section class="grid">
+{% for row in latest %}
+<article class="card {{ 'danger' if row.risk_level == '위험' else '' }}">
+<h2>{{ row.cell_name }}</h2>
+<p>온도 {{ row.temperature or '-' }}℃ / 습도 {{ row.humidity or '-' }}% / 수액 {{ row.sap_amount_ml or '-' }}ml</p>
+<p>AI MODE: {{ row.ai_mode or '-' }} | 병명: {{ row.disease_name or '-' }} | 확률: {{ row.disease_probability or 0 }}%</p>
+<p>경고: {{ row.env_warning or 'NORMAL' }}</p>
+<p>로봇: {{ row.state_machine or '대기' }} / {{ row.progress_rate or 0 }}% / {{ row.robot_status or '-' }}</p>
+</article>
+{% endfor %}
+</section>
+<h2>승인 대기</h2>
+<ul>{% for p in pending %}<li>{{ p.review_message }} <a href="/approvals">검토</a></li>{% else %}<li>승인 대기 없음</li>{% endfor %}</ul>
+<h2>최근 이벤트</h2>
+<ul>{% for e in events %}<li>[{{ e.event_time }}] {{ e.event_type }} - {{ e.message }}</li>{% endfor %}</ul>
+</body></html>

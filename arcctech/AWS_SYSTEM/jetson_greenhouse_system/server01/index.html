@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>STREW Vision Monitoring</title>
+    <style>
+      :root {
+        --bg: #020504;
+        --panel: #07100d;
+        --panel-2: #0b1713;
+        --line: rgba(77, 255, 149, 0.22);
+        --text: #eafff1;
+        --muted: #7fa58d;
+        --green: #39ff88;
+        --green-2: #00d66f;
+        --red: #ff304f;
+        --amber: #ffcf5a;
+        --cyan: #24e7ff;
+        --shadow: 0 0 28px rgba(57, 255, 136, 0.12);
+      }
+
+      * { box-sizing: border-box; }
+      html, body { width: 100%; min-height: 100%; }
+      body {
+        margin: 0;
+        overflow: hidden;
+        color: var(--text);
+        background:
+          radial-gradient(circle at 20% 10%, rgba(57, 255, 136, 0.12), transparent 28%),
+          radial-gradient(circle at 80% 35%, rgba(255, 48, 79, 0.1), transparent 26%),
+          linear-gradient(135deg, #010302 0%, #04110c 52%, #020504 100%);
+        font-family: Pretendard, "Noto Sans KR", Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      }
+
+      button { font: inherit; }
+
+      .shell {
+        width: min(1920px, 100vw);
+        height: min(1080px, 100vh);
+        margin: 0 auto;
+        padding: 22px;
+        display: grid;
+        grid-template-rows: 74px 124px 1fr;
+        gap: 16px;
+      }
+
+      .topbar,
+      .metric,
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: linear-gradient(145deg, rgba(7, 16, 13, 0.94), rgba(9, 25, 19, 0.88));
+        box-shadow: var(--shadow), inset 0 0 36px rgba(57, 255, 136, 0.035);
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 22px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        min-width: 420px;
+      }
+
+      .mark {
+        display: grid;
+        width: 46px;
+        height: 46px;
+        place-items: center;
+        border: 1px solid rgba(57, 255, 136, 0.55);
+        border-radius: 8px;
+        color: var(--green);
+        font-weight: 900;
+        letter-spacing: 0;
+        text-shadow: 0 0 14px rgba(57, 255, 136, 0.9);
+      }
+
+      h1, h2, h3, p { margin: 0; }
+      h1 { font-size: 22px; letter-spacing: 0; }
+      .brand p, .timestamp { color: var(--muted); font-size: 13px; }
+      .top-actions { display: flex; align-items: center; gap: 12px; }
+      .live {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--green);
+        font-size: 14px;
+        font-weight: 800;
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: currentColor;
+        box-shadow: 0 0 16px currentColor;
+      }
+      .action {
+        min-width: 112px;
+        min-height: 38px;
+        border: 1px solid rgba(57, 255, 136, 0.45);
+        border-radius: 8px;
+        color: var(--green);
+        background: rgba(57, 255, 136, 0.06);
+        cursor: pointer;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(8, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .metric {
+        padding: 16px 16px 14px;
+        min-width: 0;
+      }
+      .metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .metric strong {
+        display: block;
+        margin-top: 9px;
+        color: var(--green);
+        font-size: clamp(24px, 1.8vw, 34px);
+        line-height: 1;
+        text-shadow: 0 0 18px rgba(57, 255, 136, 0.45);
+      }
+      .metric.danger strong { color: var(--red); text-shadow: 0 0 18px rgba(255, 48, 79, 0.55); }
+
+      .grid {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: 1.55fr 0.95fr;
+        gap: 16px;
+      }
+      .left, .right {
+        min-height: 0;
+        display: grid;
+        gap: 16px;
+      }
+      .left { grid-template-rows: 1.15fr 0.85fr; }
+      .right { grid-template-rows: 1fr 1fr; }
+
+      .panel {
+        min-height: 0;
+        overflow: hidden;
+        display: grid;
+        grid-template-rows: 52px 1fr;
+      }
+      .panel header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--line);
+        padding: 0 16px;
+        background: rgba(57, 255, 136, 0.035);
+      }
+      .panel h2 { font-size: 17px; }
+      .panel-body { min-height: 0; padding: 14px; }
+
+      .panel-grid {
+        height: 100%;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .monitor-card {
+        position: relative;
+        min-width: 0;
+        padding: 16px;
+        border: 1px solid rgba(57, 255, 136, 0.24);
+        border-radius: 8px;
+        background:
+          linear-gradient(180deg, rgba(57, 255, 136, 0.08), rgba(57, 255, 136, 0.01)),
+          #050b09;
+      }
+      .monitor-card.danger {
+        border-color: rgba(255, 48, 79, 0.58);
+        box-shadow: inset 0 0 30px rgba(255, 48, 79, 0.08);
+      }
+      .card-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 15px;
+      }
+      .id {
+        color: var(--green);
+        font-size: 30px;
+        font-weight: 900;
+        line-height: 1;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 58px;
+        min-height: 26px;
+        padding: 0 9px;
+        border: 1px solid rgba(57, 255, 136, 0.42);
+        border-radius: 999px;
+        color: var(--green);
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+      .badge.red { border-color: rgba(255, 48, 79, 0.58); color: var(--red); }
+      .badge.amber { border-color: rgba(255, 207, 90, 0.58); color: var(--amber); }
+      .card-values {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .value {
+        min-width: 0;
+        padding: 10px;
+        border: 1px solid rgba(127, 165, 141, 0.18);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .value span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .value strong {
+        display: block;
+        margin-top: 5px;
+        overflow: hidden;
+        color: var(--text);
+        font-size: 18px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .wide { grid-column: span 2; }
+      .bar {
+        height: 8px;
+        margin-top: 8px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(127, 165, 141, 0.18);
+      }
+      .bar i {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--green-2), var(--green));
+        box-shadow: 0 0 14px rgba(57, 255, 136, 0.6);
+      }
+      .danger .bar i, .bar.red i {
+        background: linear-gradient(90deg, #9c1026, var(--red));
+        box-shadow: 0 0 14px rgba(255, 48, 79, 0.7);
+      }
+
+      .chart {
+        height: 100%;
+        display: grid;
+        grid-template-columns: repeat(24, minmax(0, 1fr));
+        align-items: end;
+        gap: 6px;
+      }
+      .chart-col {
+        display: grid;
+        align-items: end;
+        height: 100%;
+        gap: 4px;
+      }
+      .chart-bar {
+        min-height: 10px;
+        border-radius: 5px 5px 2px 2px;
+        background: linear-gradient(180deg, var(--cyan), var(--green));
+        box-shadow: 0 0 12px rgba(36, 231, 255, 0.36);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+      th, td {
+        overflow: hidden;
+        padding: 11px 10px;
+        border-bottom: 1px solid rgba(77, 255, 149, 0.14);
+        font-size: 14px;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      th { color: var(--muted); font-size: 12px; font-weight: 700; }
+
+      .event-list {
+        height: 100%;
+        display: grid;
+        gap: 9px;
+        overflow: hidden;
+      }
+      .event {
+        display: grid;
+        grid-template-columns: 48px 1fr auto;
+        align-items: center;
+        gap: 10px;
+        padding: 10px;
+        border: 1px solid rgba(77, 255, 149, 0.16);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .event strong { color: var(--green); font-size: 18px; }
+      .event span { display: block; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+
+      @media (max-width: 1280px) {
+        body { overflow: auto; }
+        .shell { height: auto; min-height: 100vh; grid-template-rows: auto auto auto; }
+        .topbar { min-height: 74px; }
+        .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        .grid { grid-template-columns: 1fr; }
+        .panel-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+
+      @media (max-width: 760px) {
+        .shell { padding: 14px; }
+        .topbar { align-items: flex-start; flex-direction: column; padding: 16px; gap: 12px; }
+        .brand { min-width: 0; }
+        .metrics, .panel-grid { grid-template-columns: 1fr; }
+        .left, .right { grid-template-rows: auto; }
+        .chart { min-height: 220px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="mark">SV</div>
+          <div>
+            <h1>STREW VISION 통합 모니터링</h1>
+            <p>ID 1~4 센서, 작업, 병해, 공급 수액량, 검증 상태 실시간 표시</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <span class="timestamp" id="timestamp">--</span>
+          <span class="live"><i class="dot"></i><b id="connection">API 연결 중</b></span>
+          <button class="action" type="button" id="randomize">난수 재생성</button>
+        </div>
+      </header>
+
+      <section class="metrics" id="metrics"></section>
+
+      <section class="grid">
+        <div class="left">
+          <article class="panel">
+            <header>
+              <h2>전체 모니터링 패널</h2>
+              <span class="badge" id="panelCount">4 PANEL</span>
+            </header>
+            <div class="panel-body">
+              <div class="panel-grid" id="panelGrid"></div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header>
+              <h2>최근 6시간 작업률 추이</h2>
+              <span class="badge">RANDOM DATA</span>
+            </header>
+            <div class="panel-body">
+              <div class="chart" id="chart"></div>
+            </div>
+          </article>
+        </div>
+
+        <div class="right">
+          <article class="panel">
+            <header>
+              <h2>질병 발생률 및 검증</h2>
+              <span class="badge red" id="warningCount">0 WARNING</span>
+            </header>
+            <div class="panel-body">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>종류</th>
+                    <th>구분</th>
+                    <th>확률</th>
+                    <th>검증</th>
+                  </tr>
+                </thead>
+                <tbody id="diseaseTable"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header>
+              <h2>작업 및 공급 상태</h2>
+              <span class="badge">0~750</span>
+            </header>
+            <div class="panel-body">
+              <div class="event-list" id="eventList"></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const rand = (min, max) => Math.random() * (max - min) + min;
+      const pick = (items) => items[Math.floor(Math.random() * items.length)];
+      const statusBadge = (status) => status === "danger" ? "badge red" : status === "warning" ? "badge amber" : "badge";
+      const boolLabel = (value) => value ? "TRUE" : "FALSE";
+      const fmtTime = (value) => new Intl.DateTimeFormat("ko-KR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      }).format(new Date(value));
+
+      const fallback = () => {
+        const panels = Array.from({ length: 4 }, (_, index) => {
+          const diseaseType = Math.random() > 0.72 ? pick(["탄저병", "흰곰팡이병"]) : "정상";
+          const diseaseProbability = diseaseType === "정상" ? Math.round(rand(0, 18)) : Math.round(rand(58, 100));
+          return {
+            id: index + 1,
+            measuredAt: new Date().toISOString(),
+            temperature: Number(rand(18, 36).toFixed(1)),
+            humidity: Math.round(rand(40, 95)),
+            isWorking: Math.random() > 0.16,
+            workRate: Math.round(rand(20, 100)),
+            taskName: pick(["보식", "감시"]),
+            diseasePart: pick(["잎", "뿌리", "꽃", "열매"]),
+            diseaseType,
+            diseaseProbability,
+            supplyAmount: Number(rand(0, 750).toFixed(1)),
+            isVerified: Math.random() > 0.22,
+            status: diseaseType === "정상" ? "normal" : diseaseProbability >= 75 ? "danger" : "warning"
+          };
+        });
+
+        return {
+          generatedAt: new Date().toISOString(),
+          panels,
+          history: Array.from({ length: 24 }, (_, index) => ({
+            workRate: Math.round(42 + Math.sin(index / 2) * 28 + rand(0, 22))
+          })),
+          summary: summarize(panels)
+        };
+      };
+
+      function summarize(panels) {
+        const avg = (field) => Number((panels.reduce((sum, row) => sum + Number(row[field] || 0), 0) / panels.length).toFixed(1));
+        return {
+          panelCount: panels.length,
+          activeCount: panels.filter((row) => row.isWorking).length,
+          warningCount: panels.filter((row) => row.status !== "normal").length,
+          verifiedCount: panels.filter((row) => row.isVerified).length,
+          avgTemperature: avg("temperature"),
+          avgHumidity: avg("humidity"),
+          avgWorkRate: avg("workRate"),
+          avgDiseaseProbability: avg("diseaseProbability"),
+          totalSupply: Number(panels.reduce((sum, row) => sum + Number(row.supplyAmount || 0), 0).toFixed(1))
+        };
+      }
+
+      async function loadDashboard() {
+        try {
+          const response = await fetch("/api/dashboard", { cache: "no-store" });
+          if (!response.ok) throw new Error("API response failed");
+          const data = await response.json();
+          $("connection").textContent = "API LIVE";
+          render(data);
+        } catch (error) {
+          $("connection").textContent = "PREVIEW";
+          render(fallback());
+        }
+      }
+
+      function render(data) {
+        $("timestamp").textContent = `갱신 ${fmtTime(data.generatedAt)}`;
+        $("panelCount").textContent = `${data.summary.panelCount} PANEL`;
+        $("warningCount").textContent = `${data.summary.warningCount} WARNING`;
+
+        $("metrics").innerHTML = [
+          ["평균 온도", `${data.summary.avgTemperature}°C`],
+          ["평균 습도", `${data.summary.avgHumidity}%`],
+          ["작업 중", `${data.summary.activeCount}/${data.summary.panelCount}`],
+          ["평균 작업률", `${data.summary.avgWorkRate}%`],
+          ["질병 평균", `${data.summary.avgDiseaseProbability}%`, data.summary.warningCount ? "danger" : ""],
+          ["공급 수액량", `${data.summary.totalSupply}L`],
+          ["검증 완료", `${data.summary.verifiedCount}/${data.summary.panelCount}`],
+          ["데이터 형식", "int/date/float/bool"]
+        ].map(([label, value, tone]) => `
+          <article class="metric ${tone || ""}">
+            <span>${label}</span>
+            <strong>${value}</strong>
+          </article>
+        `).join("");
+
+        $("panelGrid").innerHTML = data.panels.map((item) => `
+          <article class="monitor-card ${item.status}">
+            <div class="card-head">
+              <div>
+                <div class="id">ID ${item.id}</div>
+                <span class="timestamp">${fmtTime(item.measuredAt)}</span>
+              </div>
+              <span class="${statusBadge(item.status)}">${item.status.toUpperCase()}</span>
+            </div>
+            <div class="card-values">
+              <div class="value"><span>온도</span><strong>${item.temperature.toFixed(1)}°C</strong></div>
+              <div class="value"><span>습도</span><strong>${item.humidity}%</strong></div>
+              <div class="value"><span>작업유무</span><strong>${boolLabel(item.isWorking)}</strong></div>
+              <div class="value"><span>작업명</span><strong>${item.taskName}</strong></div>
+              <div class="value wide">
+                <span>작업률</span><strong>${item.workRate}%</strong>
+                <div class="bar"><i style="width:${item.workRate}%"></i></div>
+              </div>
+              <div class="value wide">
+                <span>발병률 ${item.diseasePart} / ${item.diseaseType}</span><strong>${item.diseaseProbability}%</strong>
+                <div class="bar ${item.status === "normal" ? "" : "red"}"><i style="width:${item.diseaseProbability}%"></i></div>
+              </div>
+              <div class="value"><span>공급 수액량</span><strong>${item.supplyAmount.toFixed(1)}L</strong></div>
+              <div class="value"><span>검증</span><strong>${boolLabel(item.isVerified)}</strong></div>
+            </div>
+          </article>
+        `).join("");
+
+        $("chart").innerHTML = data.history.slice(-24).map((item) => `
+          <div class="chart-col">
+            <div class="chart-bar" style="height:${Math.max(10, item.workRate * 1.45)}px"></div>
+          </div>
+        `).join("");
+
+        $("diseaseTable").innerHTML = data.panels.map((item) => `
+          <tr>
+            <td>ID ${item.id}</td>
+            <td>${item.diseasePart}</td>
+            <td>${item.diseaseType}</td>
+            <td><span class="${statusBadge(item.status)}">${item.diseaseProbability}%</span></td>
+            <td>${boolLabel(item.isVerified)}</td>
+          </tr>
+        `).join("");
+
+        $("eventList").innerHTML = data.panels.map((item) => `
+          <div class="event">
+            <strong>${item.id}</strong>
+            <div>
+              <b>${item.taskName} ${item.isWorking ? "진행" : "대기"}</b>
+              <span>작업률 ${item.workRate}% · 공급 ${item.supplyAmount.toFixed(1)}L · ${item.diseasePart} ${item.diseaseType}</span>
+            </div>
+            <span class="${statusBadge(item.status)}">${boolLabel(item.isVerified)}</span>
+          </div>
+        `).join("");
+      }
+
+      $("randomize").addEventListener("click", async () => {
+        try {
+          const response = await fetch("/api/randomize", { method: "POST" });
+          if (!response.ok) throw new Error("randomize failed");
+          render(await response.json());
+        } catch (error) {
+          render(fallback());
+        }
+      });
+
+      loadDashboard();
+      setInterval(loadDashboard, 10000);
+    </script>
+  </body>
+</html>
