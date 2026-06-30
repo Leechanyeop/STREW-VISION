@@ -1,6 +1,0 @@
-fastapi==0.75.2
-uvicorn[standard]==0.16.0
-jinja2==3.0.3
-python-multipart==0.0.5
-pydantic==1.9.2
-click==7.1.2
