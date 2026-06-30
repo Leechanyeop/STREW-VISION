@@ -1,0 +1,17 @@
+﻿requests==2.32.3
+pyserial==3.5
+python-dotenv==1.0.1
+ultralytics>=8.3.0
+opencv-python>=4.10.0
+numpy>=1.26.0
+pillow>=11.0.0
+scipy>=1.13.0
+pandas>=2.2.0
+matplotlib>=3.9.0
+pyzbar>=0.1.9
+paho-mqtt>=2.1.0
+boto3>=1.35.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+segmentation-models-pytorch>=0.3.4
+albumentations>=1.4.0

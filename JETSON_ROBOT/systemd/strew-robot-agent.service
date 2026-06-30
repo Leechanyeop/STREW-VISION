@@ -1,0 +1,15 @@
+﻿[Unit]
+Description=STREW Jetson Robot Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/jetson/STREW_VISION/JETSON_ROBOT
+EnvironmentFile=/home/jetson/STREW_VISION/JETSON_ROBOT/.env
+ExecStart=/home/jetson/STREW_VISION/JETSON_ROBOT/.venv/bin/python -m strew_robot.main
+Restart=always
+RestartSec=3
+User=jetson
+
+[Install]
+WantedBy=multi-user.target

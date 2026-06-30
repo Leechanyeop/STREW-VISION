@@ -1,0 +1,5 @@
+#!/bin/sh
+
+dtc -Wno-interrupts_property -Wno-unit_address_vs_reg -@ -I dts -O dtb -o imx708.dtbo imx708-overlay.dts
+
+install -m 751 imx708.dtbo /boot/overlays/
