@@ -13,10 +13,10 @@
 """
 
 import json
-from typing import Any
+from typing import Any, Dict
 
 
-def encode_packet(payload: dict[str, Any]) -> bytes:
+def encode_packet(payload: Dict[str, Any]) -> bytes:
     r"""딕셔너리를 "한 줄 JSON + 개행문자" 형태의 UTF-8 바이트로 변환한다.
 
     예: {"task": "MOVE", "x": 300} -> b'{"task":"MOVE","x":300}\n'
