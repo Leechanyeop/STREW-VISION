@@ -10,6 +10,7 @@ class VisionResult:
     y_center: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    status: Optional[str] = None
 
     def to_payload(self) -> Dict[str, Any]:
         return asdict(self)

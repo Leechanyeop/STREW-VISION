@@ -1,5 +1,5 @@
 from ai.detector.result import VisionResult
-
+import random
 
 class VisionSource:
     def read(self) -> VisionResult:
@@ -15,6 +15,7 @@ class MockVisionSource(VisionSource):
             y_center=360,
             width=160,
             height=120,
+            status = random.choice(["healthy", "powdery_mildew", "missing_plant"])
         )
 
 
