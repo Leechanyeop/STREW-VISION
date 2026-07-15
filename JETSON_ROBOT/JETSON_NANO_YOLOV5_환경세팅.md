@@ -87,9 +87,13 @@ cd yolov5
 pip3 install -r requirements.txt
 ```
 
-## 6. 학습 → TensorRT 엔진 변환 (참고 레포: mailrocketsystems/JetsonYolov5)
+## 6. 학습 → TensorRT 엔진 변환
 
-중요: 이 참고 레포의 `yolov5n.pt`/`yolov5s.pt`는 COCO 예시 가중치일 뿐이다. 우리 프로젝트는 식물 상태(healthy/powdery_mildew/missing_plant/nutrition_needed/empty_cell) 클래스로 **직접 학습한 커스텀 YOLOv5n 가중치**가 필요하다. 아래는 학습이 끝난 `.pt` 파일을 TensorRT 엔진으로 바꾸는 절차.
+우리 프로젝트는 식물 상태(healthy/powdery_mildew/missing_plant/empty_cell) 4개 클래스로 **직접 학습한 커스텀 가중치**가 필요하다(`nutrition_needed`는 제외 — `robot/planner.py`의 `ACTION_MAP`이 이 4개만 다루고, 매핑 안 된 값은 전부 기본값 `SKIP`으로 빠진다).
+
+**2026-07-15 결정**: 실제로 학습이 끝난 가중치가 YOLOv8(`ultralytics`) 기준 `.pt`로 이미 존재함. 아래 6-A(YOLOv5 전용, mailrocketsystems/JetsonYolov5 기준 — `gen_wts.py`+C++ 빌드)는 v8 가중치의 레이어 구조(anchor-free head, C2f 블록 등)를 못 읽으므로 **이 프로젝트엔 해당 없음**. 대신 6-B(ONNX 경유) 경로를 쓰기로 함 — 시간이 촉박해 v5로 재학습하는 대신, 이미 있는 v8 가중치를 살리는 쪽을 선택. TensorRT 8.2.1.8이 ultralytics의 최신 ONNX export 연산(op)을 전부 지원하는지는 아직 검증 전이며, 6-B 1단계에서 실패하면 `--opset` 낮추기/`onnx-simplifier` 적용/6-A로 회귀(재학습) 중 택해야 함.
+
+### 6-A. YOLOv5 전용 경로 (참고: mailrocketsystems/JetsonYolov5) — 현재 미사용
 
 ```bash
 # .pt -> .wts 변환
@@ -105,6 +109,29 @@ make
 # 테스트
 ./yolov5_det -d best.engine ../images
 ```
+
+### 6-B. YOLOv8 → ONNX → TensorRT 경로 (현재 채택)
+
+1단계는 **젯슨 나노가 아닌 별도 PC**(Python 3.8+, `ultralytics` 설치 가능한 환경)에서 실행한다. 2단계부터는 젯슨 나노(Python 3.6.9, TensorRT 8.2.1.8)에서 실행한다.
+
+```bash
+# [별도 PC, Python 3.8+] 1. .pt -> .onnx export
+pip install ultralytics
+python3 -c "
+from ultralytics import YOLO
+model = YOLO('best_v8.pt')
+model.export(format='onnx', opset=12, simplify=True)
+"
+# best_v8.onnx 생성됨 -> scp 등으로 젯슨 나노에 복사
+
+# [젯슨 나노] 2. trtexec로 우선 파싱 가능 여부부터 검증
+#    (TensorRT 8.2.1.8이 이 ONNX의 연산을 다 지원하는지 여기서 바로 확인됨)
+/usr/src/tensorrt/bin/trtexec --onnx=best_v8.onnx --saveEngine=best.engine --fp16
+
+# 실패 시: opset 낮춰서 재export(예: opset=11) 또는 onnx-simplifier 재적용 후 재시도
+```
+
+**주의**: `robot/ai/detector/camera.py`의 엔진 로딩 코드(`trt.Runtime().deserialize_cuda_engine()`)는 `.engine` 파일이 어떤 경로(6-A든 6-B든)로 만들어졌든 그대로 읽을 수 있음 — 엔진 로딩 자체는 파이프라인에 무관. 다만 **출력 텐서 구조는 다를 수 있음**: YOLOv5(C++ 레포 기준)는 보통 출력이 여러 개로 분리되어 있는 반면, YOLOv8 ONNX export는 보통 출력이 단일 텐서(`[1, 4+클래스수, N]` 형태, NMS 미포함)로 나옴. 실제 추론 후처리 코드는 `best.engine`이 만들어진 뒤 `self.engine`의 바인딩 개수/shape를 실제로 찍어보고 그에 맞춰 작성해야 함(추측하지 말 것).
 
 ## 참고 자료
 

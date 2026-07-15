@@ -1,127 +1,83 @@
-# JETSON_ROBOT 수정 구축 계획
+# JETSON_ROBOT 수정 구축 계획 (v4, 2026-07-15 4차 개정 반영)
 
-기준 문서: Notion `Volume 01. JETSON NANO System Engineering Manual`
-변경 사유: **지금 당장은 AI 추론(카메라/YOLO/TensorRT) 기능을 추가하지 않는다. 대신 AWS가 이미 계산해 둔 비전인식 결과만 받아서 쓴다.**
+이전 버전(v3)은 아키텍처 전환의 1차 개정(결정권 이전, `ASSIGN_TARGET` 단일 셀 지정)까지만 반영되어 있었다. 그 사이 실시간으로 2~4차 개정이 이어져 순회 사이클 관리 전체와 ERROR 복구 경로까지 확정됐고, 그 김에 남아있던 정리 항목(설정값 불일치, 죽은 코드)도 이번 라운드에서 함께 마무리했다. 이 버전은 그 전체를 반영한다.
 
-## 0. 핵심 결정
+## 0. v3 대비 완료된 것
 
-Notion 마스터플랜은 Jetson Nano에서 카메라부터 YOLO, TensorRT까지 온디바이스로 전부 구축하는 것(PHASE 2~6)을 전제로 한다. 이번 결정으로 그 전제가 바뀐다.
+| 항목 | 상태 |
+|---|---|
+| **PROGRESS_UPDATE 추가(2차 개정)** | **완료.** Mega가 작업 중 셀 번호(`target`)+상태머신(`state`)+진행률(`progress`)을 수시로 중계. Jetson은 `post_progress`로 AWS 릴레이만 함(응답 불필요). |
+| **순회 사이클 관리 이전(3차 개정)** | **완료.** `ASSIGN_TARGET`(단일 셀 지정) 폐기, `START_CYCLE`(셀 지정 없이 트리거만)로 대체. Mega가 1~4번 셀 전체를 자체 순회하고 초기 위치 복귀 후 `CYCLE_COMPLETE` 전송. Mega 최상위 상태 IDLE/RUN/ERROR를 Jetson이 인지. |
+| **ERROR 복구 경로(4차 개정)** | **완료.** `ERROR`에 `severity`(minor/critical, 기본 critical) 필드 추가. `severity=minor`일 때만 Jetson이 `RESET` 전송 가능 — critical이면 물리 리셋만 유효(Mega도 자체 거부해야 함, 이중 안전장치). |
+| **무응답 워치독(4차 개정)** | **완료.** `cycle_active` 중 120초(`MEGA_SILENCE_TIMEOUT_SEC`) 이상 UART 메시지가 없으면 Jetson이 암묵적 critical 실패로 간주, AWS에 TIMEOUT 보고. Jetson 단독 구현, Mega 쪽 작업 불필요. |
+| **시리얼 쓰기 Lock(4차 개정)** | **완료.** `run_once()`와 `_uart_listener_loop()` 양쪽에서 발생하던 쓰기 경합을 `ArduinoLink._write_lock`(`threading.Lock`)으로 해결. |
+| **`config/settings.py` 설정값 불일치 수정** | **완료.** `yolo_model_path` 기본값을 TensorRT 로더 요구사항에 맞게 `models/best.pt` → `models/best.engine`으로 수정. |
+| **레거시 죽은 코드 정리** | **완료.** `robot/command.py`의 `ArduinoCommand`, `robot/uart.py`의 `stream_progress()` — 참조 없음 확인 후 삭제. `robot/planner.py`는 Mega 포팅 스펙으로 의도적 보존(제외). |
+| **Mega 개발자용 PDF 안내** | **완료.** `Jetson_Mega_프로토콜_변경_안내_v4.pdf` — 전체 변경 이력, 8종 메시지 명세, Mega 필수 구현 체크리스트 포함. |
 
-- 바뀌는 것: `VisionResult`의 출처가 "Jetson이 카메라로 직접 추론"에서 "AWS가 내려주는 결과를 그대로 수신"으로 바뀐다.
-- 안 바뀌는 것: `VisionResult` 이후의 파이프라인(Decision Engine → Robot Command → UART → Arduino → 결과 보고)은 원래 계획 그대로 간다. Notion 문서가 강조하는 "모든 모듈은 교체 가능해야 한다"는 원칙과도 맞다 — 비전 공급자만 카메라에서 AWS로 교체하는 것.
+## 1. 신규 아키텍처 — 지금 실제로 설계/구현된 흐름 (4차 개정 최종)
 
-**[추가 결정]** AWS 서버 구현(`strew-backend` 등)도 지금 당장은 하지 않는다. 즉 지금은 AI 추론도, AWS 연동도 둘 다 없는 상태다. 그렇다면 지금 실제로 만들 수 있는 건 "AWS/카메라 둘 다 없어도 돌아가는 부분", 즉 **Decision Engine + Robot Command + UART 구간을 Mock 입력으로 먼저 완성**하는 것이다. `VisionResult`와 Task 데이터를 실제로 어디서 받아오는지(AWS든 카메라든)는 인터페이스 뒤로 숨겨두고, 나중에 AWS가 준비되면 Mock을 실제 호출로 갈아끼우기만 하면 되도록 만든다.
+```
+Jetson: task 확보(AWS 또는 mock) -> 이미 순회 중 아니면 Mega에 START_CYCLE 전송, 응답 대기 안 함
+Mega:   IDLE -> RUN 전환, 1~4번 셀 자체 순회 (내부 로직 아직 미구현/TODO)
+Mega -> Jetson: REQUEST_VISION (셀마다, Mega가 필요할 때마다)
+Jetson: vision.read() -> 날것 status만 VISION_RESULT로 회신 (_uart_listener_loop 스레드에서 처리)
+Mega:   그 status로 REPLACE/OBSERVE/SKIP 자체 판단 + 물리 동작 (아직 미구현/TODO)
+Mega -> Jetson: PROGRESS_UPDATE (작업 중 수시로, 정보성)
+Mega -> Jetson: REPORT_RESULT (셀 하나 끝날 때마다, 순회당 최대 4회)
+Jetson: AWS_ENABLED면 post_response/post_progress로 릴레이
+Mega -> Jetson: CYCLE_COMPLETE (4번 다 돌고 초기 위치 복귀, IDLE 전환)
+(오류 시) Mega -> Jetson: ERROR(reason, severity)
+(minor면) Jetson -> Mega: RESET (critical이면 전송 자체를 거부)
+(Mega가 응답을 완전히 멈추면) Jetson: 120초 후 워치독이 critical 실패로 간주, AWS에 TIMEOUT 보고
+```
 
-## 1. PHASE별 대응표 (원래 계획 vs 지금 결정)
+**UART 읽기와 `vision.read()`(TensorRT)는 전부 `_uart_listener_loop()` 스레드 하나가 담당한다(단일 소유자 원칙). 시리얼 쓰기는 `run_once()`와 listener 스레드 양쪽에서 발생하므로 `_write_lock`으로 별도 보호한다(단일 소유자가 아니라 Lock 방식).**
 
-| PHASE | Notion 원래 계획 | 지금 결정 |
+## 2. 여전히 보류 중인 것
+
+| 항목 | 상태 | 비고 |
 |---|---|---|
-| PHASE 0 | 시스템 아키텍처 · 역할 분리 | 유지 (완료 상태 그대로) |
-| PHASE 1 | Project Foundation (디렉터리 고정) | 유지, 단 `ai/` 하위 목표 구조는 축소 |
-| PHASE 2 | AI Framework (Camera → Inference Engine → Vision Result) | **생략.** 대신 "AWS Vision Result Receiver"를 새로 정의 |
-| PHASE 3 | AI Engine Interface (`VisionEngine.execute(frame)`) | **보류.** 인터페이스 설계 개념만 유지, 지금 구현하지 않음 |
-| PHASE 4 | YOLO Engine (PyTorch/YOLO/Weights/Inference) | **보류** |
-| PHASE 5 | TensorRT | **보류** |
-| PHASE 6 | Vision Pipeline (CSI Camera→YOLO→QR→Tracking→Merge) | **보류** |
-| PHASE 7 | Robot Integration (VisionResult→RobotAgent→Arduino→Cloud) | **부분 진행.** VisionResult·Task는 당분간 Mock으로 대체, Decision→Command→UART 구간만 먼저 완성 |
-| PHASE 8 | Cloud (AWS/MQTT/Dashboard/History) | **[수정] 이것도 보류.** AWS 서버 구현 자체를 지금 하지 않기로 함 |
-| PHASE 9 | Optimization (TensorRT/CUDA) | 보류 (PHASE 4~6과 함께 나중에) |
-| PHASE 10 | Deployment (systemd 등) | 보류 — 배포할 AWS 연동이 없는 상태이므로 뒤로 미룸 |
+| AWS 서버 구현 자체 | **보류** | 여전히 이 저장소에 없음. mock으로만 검증. |
+| **Mega 펌웨어 신규 프로토콜 반영** | **보류(최우선순위 아님)** | `mega_firmware.ino`가 아직 구버전 그대로. `ACTION_MAP` 로직 C++ 포팅 + 8종 메시지 송수신 + IDLE/RUN/ERROR 상태머신 + severity 판정 + critical일 때 RESET 거부 로직까지 필요. 외부 개발자에게 PDF로 안내 완료, 실제 반영은 시간 될 때. |
+| `ai/detector/` 실제 YOLO 추론 | **진행 중** | task #19. `.onnx`→`.engine` 확보 대기 중(팀원이 export 예정). `labels.yaml` 클래스 순서도 함께 필요. |
+| `vision.read()` 타임아웃 | **미구현** | 시리얼 쓰기 Lock을 먼저 구현하기로 선택함(둘 다 필요하다고 판단했던 항목 중 우선순위 낮은 쪽). |
+| `ai/qr/`, `ai/segmentation/`, `ai/tracker/` | **보류** | 전부 빈 폴더, 미착수. |
+| `config/uart.yaml` | **보류** | 로드하는 곳 없는 죽은 설정 파일, 삭제 권장이지만 낮은 우선순위. |
+| stale PDF v1~v3 삭제 여부 | **결정 대기** | v4가 최종본이므로 이전 버전 삭제 검토 중. |
 
-## 2. 새 데이터 흐름
+## 3. Decision Engine 규칙 — "Mega 포팅 스펙"으로 성격이 바뀐 채 유지
 
-**원래 계획**
-```
-CSI Camera → YOLO Inference → VisionResult → Decision Engine → Robot Command
-```
+`robot/planner.py`의 규칙표는 안 바뀌었다. 여전히 Jetson이 실행하는 코드가 아니라 **Mega 펌웨어(C++)로 그대로 옮겨 심어야 할 스펙**이다.
 
-**지금 결정 (1차 — 지난 대화 시점)**
-```
-AWS (비전인식 결과 저장소) → REST 조회 → VisionResult → Decision Engine → Robot Command
-```
+| Vision Status | Robot Command |
+|---|---|
+| healthy | OBSERVE |
+| powdery_mildew | REPLACE |
+| missing_plant | REPLACE |
+| empty_cell / 그 외 매핑 안 된 값 | SKIP (기본값) |
 
-**지금 결정 (2차 — AWS 구현도 보류)**
-```
-Mock Task + Mock VisionResult → Decision Engine → Robot Command → UART → Arduino
-```
+## 4. 코드 매핑 (2026-07-15 최종)
 
-`VisionResult`·Task 객체 모두 이미 코드에 존재하는 형태를 그대로 쓴다(`ai/detector/result.py`의 `VisionResult`, `ai/detector/camera.py`의 `MockVisionSource`가 이미 Mock 데이터를 리턴하도록 구현되어 있음). 지금은 이 Mock 공급자를 그대로 두고 Decision Engine 이후 로직만 완성한다. AWS가 준비되면 Mock 대신 실제 REST 호출로 교체하는 것이 마지막 단계가 된다 — 즉 "공급자 교체 지점"이 AWS에서 Mock으로 한 단계 더 뒤로 밀린 것뿐, 구조 자체는 바뀌지 않는다.
-
-## 3. 지금 당장 만들 것
-
-1. `robot/planner.py`를 Chapter 05-4 Decision Engine 규칙표대로 실제 구현 (현재 2줄 통과용 스텁 상태) — **최우선, AWS/AI 없이도 바로 착수 가능**
-2. `robot/state_machine.py`를 Mock Task + `MockVisionSource`(이미 있음) 기준으로 동작하도록 정리 — 카메라·AWS 호출 부분은 그대로 두되 당장 실제 연결은 안 함
-3. `tests/test_decision.py`를 7절 Rule Table의 4가지 케이스(OBSERVE/REPLACE/NUTRITION/SKIP) 기준으로 확장
-4. Mock 기반 End-to-End 로컬 테스트: Mock Task → Mock Vision → Decision Engine → Robot Command → (실제 Arduino 연결 시) UART 전송까지 확인
-
-## 4. 지금 당장 안 만들 것 (보류)
-
-- `ai/detector/engine.py` 실제 추론 구현
-- YOLOv5/v8 재학습, TensorRT 변환 (지난 문서에서 지적한 v8/v5 불일치 문제는 이 보류로 자연스럽게 뒤로 미뤄짐)
-- `ai/detector/camera.py`의 실카메라(CSI) 경로
-- `ai/qr/`, `ai/segmentation/`, `ai/tracker/` 구현
-- Notion `OPERATION 003`이 지시하는 `ai/engine`, `ai/models`, `ai/weights`, `ai/benchmark`, `ai/pipeline` 폴더 생성
-- **[추가] AWS 서버 구현 전체** (`strew-backend` 등) — `cloud/api_client.py`에 새 함수를 추가하는 작업도 지금은 보류. 호출할 서버가 없으므로 지금 만들어도 검증 불가
-- **[추가] `cloud/mqtt.py`, `cloud/sync.py`** — AWS 자체가 보류이므로 자연히 함께 보류
-
-## 5. 코드 매핑 (기존 파일 → 이번 계획에서의 역할)
-
-| 계획 요소 | 기존 파일 | 상태 |
+| 요소 | 파일 | 상태 |
 |---|---|---|
-| Task 조회 | `cloud/api_client.py`의 `next_task()` | 구현은 되어 있으나 **호출 보류** (AWS 없음) |
-| 비전결과 조회 | `cloud/api_client.py` | **보류** — AWS 확정 전까지 착수 안 함 |
-| Mock Task/Vision | `ai/detector/camera.py`의 `MockVisionSource` | 이미 있음 — 지금 단계의 실질적 입력 소스 |
-| VisionResult 데이터 구조 | `ai/detector/result.py`의 `VisionResult` | 이미 있음 — 그대로 재사용 |
-| Decision Engine | `robot/planner.py`의 `plan_task()` | 현재 2줄 스텁 → **Rule Table 실제 구현 필요 (최우선 작업)** |
-| Robot Command | `robot/command.py`의 `ArduinoCommand` | 이미 구현됨 |
-| UART 전송 | `robot/uart.py`의 `ArduinoLink` | 이미 구현됨 — Arduino 준비되면 바로 검증 가능 |
-| 결과 보고 | `cloud/api_client.py`의 `post_response()` | 구현은 되어 있으나 **호출 보류** (AWS 없음) |
-| 로봇 메인 루프 | `robot/state_machine.py`의 `RobotAgent.run_once()` | Mock 입력 기준으로 동작 확인, AWS/카메라 연결부는 나중으로 |
+| Task 조회 | `cloud/api_client.py`의 `next_task()` | 구현됨 |
+| 순회 시작 트리거 | `robot/state_machine.py`의 `run_once()` | **재작성 완료** — `cycle_active`가 아닐 때만 `START_CYCLE` 전송, 무응답 워치독 검사 포함 |
+| 비전 요청 응답 + 진행상황/결과/오류 릴레이 | `robot/state_machine.py`의 `_uart_listener_loop()` | **구현 완료** — `REQUEST_VISION`/`PROGRESS_UPDATE`/`REPORT_RESULT`/`CYCLE_COMPLETE`/`ERROR` 전부 처리 |
+| ERROR 복구 | `robot/state_machine.py`의 `send_reset()` | **구현 완료** — severity=minor일 때만 RESET 허용 |
+| 메시지 타입 상수 | `robot/command.py`의 `MSG_*` (8종) | **구현 완료**, 구버전 `ArduinoCommand`는 삭제됨 |
+| 시리얼 쓰기 동시성 보호 | `robot/uart.py`의 `ArduinoLink._write_lock` | **구현 완료** |
+| Decision Engine (참고 스펙) | `robot/planner.py`의 `plan_task()` | 런타임 미사용, 스펙으로 보존 |
+| 오프라인 재시도 | `cloud/sync.py`의 `CloudSync` | 구현 완료 |
+| MQTT 비상정지 | `cloud/mqtt.py`의 `MqttClient` | 구현 완료 |
+| YOLO 추론 | `ai/detector/camera.py` | 초기화 완료, 추론 로직 진행 중(task #19) |
+| 설정값 | `config/settings.py`의 `yolo_model_path` | `.engine` 기준으로 수정 완료 |
 
-## 6. AWS 쪽 선행조건 — 전체 보류
+## 5. 다음 순서 제안
 
-`JETSON_AWS_MEGA_INTEGRATION_PLAN.md`(기존 문서)는 정반대 방향, 즉 "Jetson이 카메라/YOLO로 비전을 캡처해서 AWS에 `POST /vision/event`로 올린다"는 흐름을 전제로 쓰여 있다. 이번 결정과도 방향이 다르고, 애초에 AWS 구현 자체를 지금 하지 않기로 했으므로 **이 문서는 지금 갱신하지 않고 그대로 둔다.** AWS 쪽 작업을 실제로 시작하는 시점에 다시 꺼내서 정리한다.
-
-지난 버전 문서에 있던 Open Question(AWS 엔드포인트 형식 A/B, 비전결과 생성 주체, task-vision 매칭 방식)들도 지금 결정할 필요가 없어졌다 — AWS 작업을 시작하는 시점에 다시 다룬다. 참고로 `strew-backend/main.py`는 여전히 빈 파일이라 어차피 지금은 호출할 서버 자체가 없다.
-
-## 7. Decision Engine 규칙 (Chapter 05-4 그대로 재사용)
-
-| Detection Status | Task | Robot Command |
-|---|---|---|
-| Healthy | OBSERVE | OBSERVE |
-| Powdery Mildew | REPLACE | REPLACE |
-| Missing Plant | REPLACE | REPLACE |
-| Nutrition Needed | NUTRITION | NUTRITION |
-| Empty Cell | NONE | SKIP |
-
-## 8. 디렉터리 구조 (수정판 — Operation 003 대체)
-
-Notion `OPERATION 003`의 `mkdir -p engine camera models weights benchmark configs utils pipeline`은 지금 실행하지 않는다. 대신 기존 구조를 그대로 활용한다.
-
-```text
-ai/
-└─ detector/
-   └─ result.py     ← VisionResult 데이터 모델만 재사용 (카메라 종속 코드는 미사용)
-robot/
-├─ planner.py        ← Decision Engine 규칙 구현 대상 (최우선)
-├─ command.py        ← 이미 구현됨
-├─ uart.py            ← 이미 구현됨
-└─ state_machine.py  ← run_once() 수정 대상
-cloud/
-└─ api_client.py     ← 비전결과 조회 함수 추가 대상
-```
-
-`ai/engine/`, `ai/models/`, `ai/weights/`, `ai/benchmark/`, `ai/camera/`, `ai/pipeline/`은 PHASE 2~6을 재개하는 시점에 생성한다.
-
-## 9. 구현 순서 제안 (AWS/AI 둘 다 보류 기준)
-
-1. `robot/planner.py`를 7절 Rule Table대로 구현 (AWS/AI 없이 바로 착수 가능, 최우선)
-2. `tests/test_decision.py`를 OBSERVE/REPLACE/NUTRITION/SKIP 4개 케이스로 확장해 Decision Engine 검증
-3. `robot/state_machine.py`를 Mock Task + `MockVisionSource` 조합으로 돌려서 Decision Engine → Robot Command 연결 확인
-4. Arduino 하드웨어가 준비되면 `robot/uart.py`로 실제 UART 송수신까지 연결해 End-to-End 로컬 테스트 (AWS 없이, `cloud.post_response()` 호출은 건너뛰거나 로그만 남기도록 임시 처리)
-5. **(보류 해제 시점)** AWS 서버 구현 착수 → 6절 Open Question 재논의 → `cloud/api_client.py`에 비전결과 조회 함수 추가 → Mock을 실제 AWS 호출로 교체
-6. **(보류 해제 시점)** 여유가 생기면 PHASE 2~6(AI Engine 온디바이스 구축) 재개
-
-## 10. 요약
-
-지금 단계에서는 AI 추론도 AWS 연동도 만들지 않는다. 대신 이미 있는 `MockVisionSource`를 입력으로 삼아 **Decision Engine(`robot/planner.py`) → Robot Command(`robot/command.py`) → UART(`robot/uart.py`)** 구간만 먼저 완성하고 검증한다. `VisionResult`·Task 인터페이스는 그대로 유지되므로, 나중에 AWS가 준비되면 Mock을 실제 호출로 교체하기만 하면 되고, 그 다음 PHASE 2~6(온디바이스 AI)을 붙일 때도 Decision Engine 이후 코드는 다시 손댈 필요가 없다.
+1. 팀원이 `.onnx` export해서 넘겨주면 → 젯슨에서 `trtexec`로 `.engine` 빌드 → `camera.py`의 `_read_with_yolo_placeholder()` 실제 추론 구현(task #19).
+2. `models/labels.yaml` 클래스 순서 채우기(팀원 확인 필요).
+3. 시간 되면 `mega_firmware.ino`에 신규 프로토콜(8종 메시지 + IDLE/RUN/ERROR + severity 판정 + critical RESET 거부) 포팅.
+4. `vision.read()` 타임아웃 구현(다음 우선순위 항목).
+5. stale PDF(v1~v3) 삭제 여부 확정.
+6. AWS 서버 구현 착수 시점 결정 → `JETSON_AWS_MEGA_INTEGRATION_PLAN.md` 재검토.

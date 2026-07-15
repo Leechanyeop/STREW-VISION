@@ -1,7 +1,7 @@
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
 
-
+#
 @dataclass
 class VisionResult:
     label: Optional[str]

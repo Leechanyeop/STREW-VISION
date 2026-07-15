@@ -26,17 +26,17 @@ void sendResponse(const char* status,
     Serial.println();
 }
 
-// 새 인터페이스(Jetson stream_progress()가 읽는 형식) 전용 응답.
-// 한 명령 처리 중에 여러 번 호출해서 RECEIVED -> ... -> COMPLETE 진행상황을 스트리밍한다.
-// Jetson 쪽은 message.get("state") == "COMPLETE" 를 볼 때까지 계속 읽으므로,
-// 이 함수를 부르는 쪽이 마지막에 반드시 "COMPLETE"를 보내야 한다.
-void sendProgress(const char* state, int progress, const char* command, const char* target)
+// 공식 인터페이스 명세(Jetson and Arduino Mega Interface.pdf) 6절 기준 응답.
+// {"task": "...", "target": "...", "state": "...", "progress": N}
+// 필드명이 "command"가 아니라 "task"인 점 주의 — 요청(Jetson->Mega)은 "command",
+// 응답(Mega->Jetson)은 "task"로 문서에 명확히 다르게 정의되어 있음.
+void sendProgress(const char* task, const char* target, const char* state, int progress)
 {
     StaticJsonDocument<192> response;
+    response["task"] = task;
+    response["target"] = target;
     response["state"] = state;
     response["progress"] = progress;
-    response["command"] = command;
-    response["target"] = target;
     serializeJson(response, Serial);
     Serial.println();
 }
@@ -75,32 +75,25 @@ void loop()
     }
 
     //--------------------------------------------------------
-    // PING
+    // PING / STATUS / HOME / MOVE / STOP / SERVO / GRIP_OPEN / GRIP_CLOSE /
+    // WATER / NUTRITION / PUMP_ON / PUMP_OFF / LED
+    // (수동 점검용 레거시 명령, 예전 단발 응답 형식 그대로 유지)
     //--------------------------------------------------------
     if (strcmp(command, "PING") == 0)
     {
         showMessage("COMMAND", "PING");
         sendResponse("PONG", "PING");
     }
-    //--------------------------------------------------------
-    // STATUS
-    //--------------------------------------------------------
     else if (strcmp(command, "STATUS") == 0)
     {
         showMessage("COMMAND", "STATUS");
         sendResponse("READY", "STATUS");
     }
-    //--------------------------------------------------------
-    // HOME
-    //--------------------------------------------------------
     else if (strcmp(command, "HOME") == 0)
     {
         showMessage("COMMAND", "HOME");
         sendResponse("DONE", "HOME");
     }
-    //--------------------------------------------------------
-    // MOVE  (수동 점검용 레거시 명령 — target은 숫자 좌표 그대로 유지)
-    //--------------------------------------------------------
     else if (strcmp(command, "MOVE") == 0)
     {
         int target = doc["target"] | 0;
@@ -109,17 +102,11 @@ void loop()
         showMessage("COMMAND", line2);
         sendResponse("DONE", "MOVE");
     }
-    //--------------------------------------------------------
-    // STOP
-    //--------------------------------------------------------
     else if (strcmp(command, "STOP") == 0)
     {
         showMessage("COMMAND", "STOP");
         sendResponse("DONE", "STOP");
     }
-    //--------------------------------------------------------
-    // SERVO
-    //--------------------------------------------------------
     else if (strcmp(command, "SERVO") == 0)
     {
         int angle = doc["angle"] | 0;
@@ -128,57 +115,36 @@ void loop()
         showMessage("SERVO", line2);
         sendResponse("DONE", "SERVO");
     }
-    //--------------------------------------------------------
-    // GRIP_OPEN
-    //--------------------------------------------------------
     else if (strcmp(command, "GRIP_OPEN") == 0)
     {
         showMessage("GRIPPER", "OPEN");
         sendResponse("DONE", "GRIP_OPEN");
     }
-    //--------------------------------------------------------
-    // GRIP_CLOSE
-    //--------------------------------------------------------
     else if (strcmp(command, "GRIP_CLOSE") == 0)
     {
         showMessage("GRIPPER", "CLOSE");
         sendResponse("DONE", "GRIP_CLOSE");
     }
-    //--------------------------------------------------------
-    // WATER
-    //--------------------------------------------------------
     else if (strcmp(command, "WATER") == 0)
     {
         showMessage("PUMP", "WATER");
         sendResponse("DONE", "WATER");
     }
-    //--------------------------------------------------------
-    // NUTRITION
-    //--------------------------------------------------------
     else if (strcmp(command, "NUTRITION") == 0)
     {
         showMessage("PUMP", "NUTRITION");
         sendResponse("DONE", "NUTRITION");
     }
-    //--------------------------------------------------------
-    // PUMP_ON
-    //--------------------------------------------------------
     else if (strcmp(command, "PUMP_ON") == 0)
     {
         showMessage("PUMP", "ON");
         sendResponse("DONE", "PUMP_ON");
     }
-    //--------------------------------------------------------
-    // PUMP_OFF
-    //--------------------------------------------------------
     else if (strcmp(command, "PUMP_OFF") == 0)
     {
         showMessage("PUMP", "OFF");
         sendResponse("DONE", "PUMP_OFF");
     }
-    //--------------------------------------------------------
-    // LED
-    //--------------------------------------------------------
     else if (strcmp(command, "LED") == 0)
     {
         const char* state = doc["state"] | "UNKNOWN";
@@ -186,36 +152,55 @@ void loop()
         sendResponse("DONE", "LED");
     }
     //--------------------------------------------------------
-    // OBSERVE  (신규 — Jetson Decision Engine이 실제로 보내는 명령)
-    // 이동 없이 그 자리에서 처리하는 작업. Mega 쪽 물리 동작은 없으므로
-    // RECEIVED -> COMPLETE 2단계로 짧게 스트리밍한다.
+    // OBSERVE — 공식 명세 5-1절 상태머신 그대로.
+    // 문서 기준으로는 OBSERVE도 "그 자리에서 아무것도 안 함"이 아니라
+    // 실제로 셀까지 이동 -> 카메라 자세 정렬 -> 6축 정밀 검사 -> 대기위치 복귀까지
+    // 물리 동작이 있는 작업임. TODO는 실제 모터/6축 제어가 들어갈 자리.
     //--------------------------------------------------------
     else if (strcmp(command, "OBSERVE") == 0)
     {
         const char* target = doc["target"] | "";
         showMessage("OBSERVE", target);
 
-        sendProgress("RECEIVED", 0, "OBSERVE", target);
-        sendProgress("COMPLETE", 100, "OBSERVE", target);
+        sendProgress("OBSERVE", target, "RECEIVED", 0);
+
+        // TODO: 대상 셀로 실제 이동 (EEPROM 조회 + 모터 제어)
+        showMessage("OBSERVE", "MOVE_TO_CELL");
+        delay(300);
+        sendProgress("OBSERVE", target, "MOVE_TO_CELL", 20);
+
+        // TODO: 검사 위치로 카메라 자세 정렬 (6축 제어)
+        showMessage("OBSERVE", "POSITION_CAM");
+        delay(300);
+        sendProgress("OBSERVE", target, "POSITION_CAMERA", 40);
+
+        // TODO: 6축을 이용한 정밀 검사 수행
+        showMessage("OBSERVE", "INSPECTION");
+        delay(300);
+        sendProgress("OBSERVE", target, "INSPECTION", 70);
+
+        // TODO: 대기 위치 복귀
+        showMessage("OBSERVE", "RETURN_HOME");
+        delay(300);
+        sendProgress("OBSERVE", target, "RETURN_HOME", 90);
+
+        sendProgress("OBSERVE", target, "COMPLETE", 100);
     }
     //--------------------------------------------------------
-    // SKIP  (신규 — 비전 재확인 없이 다음 셀로 넘어감을 의미)
-    // Mega 쪽에서 실제로 수행할 물리 동작이 없으므로 OBSERVE와 동일하게
-    // RECEIVED -> COMPLETE 2단계로 짧게 스트리밍한다.
+    // SKIP — 공식 명세 5-3절 상태머신 그대로.
+    // 종료 상태가 "COMPLETE"가 아니라 "SKIPPED"인 점 주의.
     //--------------------------------------------------------
     else if (strcmp(command, "SKIP") == 0)
     {
         const char* target = doc["target"] | "";
         showMessage("SKIP", target);
 
-        sendProgress("RECEIVED", 0, "SKIP", target);
-        sendProgress("COMPLETE", 100, "SKIP", target);
+        sendProgress("SKIP", target, "RECEIVED", 0);
+        sendProgress("SKIP", target, "SKIPPED", 100);
     }
     //--------------------------------------------------------
-    // REPLACE  (신규 인터페이스 — target은 셀 라벨 문자열, 다단계 스트리밍)
-    // TODO: 아래 각 단계의 delay()는 실제 모터/그리퍼 제어 코드가 들어갈 자리를
-    // 표시하기 위한 자리표시자(placeholder)임. 실제 픽/디스카드/배치 시퀀스는
-    // 하드웨어 배선이 끝난 뒤 채워야 함 (오케스트레이션 설계는 별도 작업).
+    // REPLACE — 공식 명세 5-2절 상태머신 그대로.
+    // TODO: 각 단계의 delay()는 실제 모터/그리퍼 제어 코드가 들어갈 자리표시자.
     //--------------------------------------------------------
     else if (strcmp(command, "REPLACE") == 0)
     {
@@ -224,24 +209,44 @@ void loop()
         snprintf(line2, sizeof(line2), "POT:%s", target);
         showMessage("REPLACE", line2);
 
-        sendProgress("RECEIVED", 0, "REPLACE", target);
+        sendProgress("REPLACE", target, "RECEIVED", 0);
 
-        // TODO: 기존 화분 집기(pick) 실제 모터 제어
-        showMessage("REPLACE", "PICKING");
-        delay(500);
-        sendProgress("PICKING", 25, "REPLACE", target);
+        // TODO: EEPROM에서 target 위치 조회 + 대상 셀로 이동
+        showMessage("REPLACE", "MOVE_TO_CELL");
+        delay(300);
+        sendProgress("REPLACE", target, "MOVE_TO_CELL", 10);
 
-        // TODO: 기존 화분 버리기(discard) 실제 모터 제어
-        showMessage("REPLACE", "DISCARDING");
-        delay(500);
-        sendProgress("DISCARDING", 50, "REPLACE", target);
+        // TODO: 기존 화분 집기 (그리퍼 제어)
+        showMessage("REPLACE", "PICK_OLD_POT");
+        delay(300);
+        sendProgress("REPLACE", target, "PICK_OLD_POT", 25);
 
-        // TODO: 새 화분 배치(place) 실제 모터 제어
-        showMessage("REPLACE", "PLACING");
-        delay(500);
-        sendProgress("PLACING", 75, "REPLACE", target);
+        // TODO: 폐기 위치로 이동
+        showMessage("REPLACE", "MOVE_DISPOSAL");
+        delay(300);
+        sendProgress("REPLACE", target, "MOVE_TO_DISPOSAL", 40);
 
-        sendProgress("COMPLETE", 100, "REPLACE", target);
+        // TODO: 기존 화분 내려놓기
+        showMessage("REPLACE", "DROP_OLD_POT");
+        delay(300);
+        sendProgress("REPLACE", target, "DROP_OLD_POT", 50);
+
+        // TODO: 새 화분 위치로 이동
+        showMessage("REPLACE", "MOVE_NEW_POT");
+        delay(300);
+        sendProgress("REPLACE", target, "MOVE_TO_NEW_POT", 60);
+
+        // TODO: 새 화분 집기
+        showMessage("REPLACE", "PICK_NEW_POT");
+        delay(300);
+        sendProgress("REPLACE", target, "PICK_NEW_POT", 75);
+
+        // TODO: 대상 셀에 새 화분 배치 + 포토센서로 위치 확인
+        showMessage("REPLACE", "PLACE_NEW_POT");
+        delay(300);
+        sendProgress("REPLACE", target, "PLACE_NEW_POT", 90);
+
+        sendProgress("REPLACE", target, "COMPLETE", 100);
     }
     //--------------------------------------------------------
     // UNKNOWN
