@@ -16,7 +16,6 @@ from robot.command import (
     MSG_PROGRESS_UPDATE,
     MSG_CYCLE_COMPLETE,
     MSG_ERROR,
-    MSG_RESET,
 )
 from robot.uart import ArduinoLink
 
@@ -28,6 +27,14 @@ from robot.uart import ArduinoLink
 # "Mega가 응답 없이 멈췄다"고 간주하는 워치독 기준 시간. 4개 셀 순회가 정상적으로도
 # 시간이 좀 걸릴 수 있어서 넉넉하게 잡음 - 실제 하드웨어 타이밍 보고 조정 필요.
 MEGA_SILENCE_TIMEOUT_SEC = 120.0
+
+# [2026-07-16 추가] 병해충 감시 도중 이 상태로 판독되면 즉시 VISION_RESULT를 회신하지
+# 않고, AWS에 판단 요청을 만들어 관리자 응답을 기다린다. 나중에 다른 병징 라벨이
+# 추가되면 여기에만 더하면 됨 - 판정 로직 자체를 여러 곳에서 안 고쳐도 되게.
+DISEASE_SUSPECT_STATUSES = {"powdery_mildew"}
+
+# 관리자 판단 대기 중 "아직 응답 안 왔나?"를 AWS에 물어보는 간격(초).
+DECISION_POLL_INTERVAL_SEC = 5.0
 
 
 # AWS가 꺼져 있을 때(cfg.aws_enabled=False) 대신 사용하는 로컬 랜덤 목업 작업.
@@ -68,6 +75,16 @@ class RobotAgent:
         # CYCLE_COMPLETE를 받으면 False로 풀린다. ERROR나 워치독 타임아웃 시엔 일부러
         # False로 안 풀어서(안전 우선) 사람이 개입하기 전까지 자동으로 다음 순회를
         # 트리거하지 않는다.
+        #
+        # [2026-07-15 4차 수정 → 5차 수정에서 단순화] 처음엔 ERROR에 severity(minor/
+        # critical)를 붙여서 minor일 때만 소프트웨어 RESET으로 cycle_active를 풀어주는
+        # 경로를 만들었었다. 그런데 실제로는 센서(전류/엔코더/리밋스위치 등)가 하나도
+        # 없어서, 물리적 문제(그리퍼 걸림/모터 이상 등)인지 그냥 느린 건지 소프트웨어가
+        # 구분할 방법이 없다는 게 명확해짐 - 구분 못 하는 걸 억지로 구분하는 척 하는 것
+        # 자체가 위험. 그래서 severity 구분과 RESET 메시지를 통째로 제거하고, ERROR는
+        # 항상 "사람이 물리적으로 확인하고 전원을 재시작해야 하는 상태"로 단순화했다.
+        # cycle_active는 ERROR/워치독 타임아웃 이후 사람이 직접 재시작(전원 재시작 등)
+        # 하기 전까지 계속 True로 남아있는다.
         self.cycle_active: bool = False
 
         # 마지막으로 Mega한테서 뭔가(어떤 타입이든) 받은 시각. run_once()가 이걸 보고
@@ -75,14 +92,16 @@ class RobotAgent:
         # (ERROR 메시지를 보낼 새도 없이 그냥 멈춰버린 경우를 잡기 위함).
         self.last_uart_message_time: float = time.monotonic()
 
-        # 최근 ERROR의 severity("minor"/"critical"). send_reset()이 이걸 보고
-        # minor가 아니면 RESET을 보내지 않는다 (critical은 물리 리셋만 허용).
-        self.last_error_severity: Optional[str] = None
+        # [2026-07-16 추가] 병해충 의심 판독 때문에 관리자 응답을 기다리는 중인지 여부.
+        # True인 동안은 run_once()의 무응답 워치독을 꺼야 한다 - Mega가 멈춘 게 아니라
+        # Jetson이 일부러 VISION_RESULT 답장을 늦추고 있는 것뿐이라서, 이걸 무응답으로
+        # 오판하면 관리자가 아직 판단 중인데도 TIMEOUT/ERROR가 나가버린다.
+        self.awaiting_decision: bool = False
 
         # UART 읽기는 이제 이 스레드 하나만 한다 (단일 소유자 — vision.read()도 이 스레드
         # 안에서만 호출됨). run_once()는 명령을 "보내기만" 하고 응답을 기다리지 않는다.
         # __init__에서 딱 한 번만 시작 (run_forever()의 while 루프 안에 넣으면 사이클마다
-        # 스레드가 계속 새로 생겨버림).
+        # 스레드가 계속 새로 생겨버린다).
         threading.Thread(target=self._uart_listener_loop, daemon=True).start()
 
     # close 메서드는 아두이노와 비전 소스를 닫는 역할을 합니다.
@@ -93,30 +112,6 @@ class RobotAgent:
         if close:
             close()
 
-    # 사람이 ERROR를 확인한 뒤 "재시작해도 좋다"고 판단했을 때 호출하는 메서드.
-    # (지금은 AWS 대시보드 버튼 -> 이 메서드 연결은 아직 안 돼있음 - AWS 서버 자체가
-    # 없어서 그 배선은 별도 작업. 지금은 이 메서드가 존재한다는 것과 안전 규칙만 확정)
-    #
-    # severity가 "minor"였을 때만 RESET을 보낸다. "critical"(또는 정보 없음)이면
-    # 거부한다 - 심각한 고장은 소프트웨어 재시작이 아니라 물리 리셋(전원 재시작 등)만
-    # 허용해야 한다는 안전 원칙 때문. Mega 펌웨어도 critical일 때 RESET을 무시하도록
-    # 만들어야 하며(이중 안전장치), 이건 Jetson 코드만으로 보장할 수 없어 Mega 개발자에게
-    # 별도로 요청해둔 사항이다.
-    def send_reset(self) -> bool:
-        if self.last_error_severity != "minor":
-            print(
-                f"[!!!] RESET 거부됨 - 마지막 오류 severity={self.last_error_severity!r} "
-                f"(minor가 아니면 물리 리셋만 허용됨)"
-            )
-            return False
-
-        self.arduino.send_json_line({"type": MSG_RESET})
-        self.cycle_active = False
-        self.last_error_severity = None
-        self.last_uart_message_time = time.monotonic()
-        print("[RESET] Mega에 RESET 전송함 - 다음 run_once()부터 새 순회 트리거 가능")
-        return True
-
     # run_once 메서드는 한 사이클마다 AWS에서 다음 task를 받아와 Mega한테
     # "순회 시작해"(START_CYCLE)라고만 트리거해준다. 셀 지정, REPLACE/OBSERVE/SKIP 판단,
     # 진행상황, 최종 결과 보고는 이제 전부 Mega가 결정/관리하고 비동기로 요청/보고하므로
@@ -124,12 +119,21 @@ class RobotAgent:
     def run_once(self) -> None:
 
         if self.cycle_active:
+            # [2026-07-16 추가] 관리자 판단 대기 중이면 워치독 자체를 건너뛴다. Mega가
+            # 멈춘 게 아니라 Jetson이 REQUEST_VISION 응답을 일부러 늦추고 있는 정상
+            # 상황이라, 이 시간 동안 UART가 조용한 건 무응답 정지의 증거가 아니다.
+            if self.awaiting_decision:
+                return
+
             # 워치독: 순회 중이라고 돼있는데 너무 오래(MEGA_SILENCE_TIMEOUT_SEC) UART로
             # 아무 말도 없으면 - ERROR 메시지조차 못 보내고 조용히 멈춘 것으로 간주.
             # ERROR와 동일하게 안전 우선으로 cycle_active를 풀지 않고 AWS에 알리기만 한다.
+            # (사람이 물리적으로 확인 후 전원 재시작해야 다음 run_once()가 다시 순회를 건다 -
+            # 이 프로젝트엔 물리 센서가 없어서 소프트웨어가 "괜찮아 보이니 자동 재시작"을
+            # 스스로 판단할 근거 자체가 없다.)
             silence = time.monotonic() - self.last_uart_message_time
             if silence > MEGA_SILENCE_TIMEOUT_SEC:
-                print(f"[!!!] Mega 무응답 {silence:.0f}초 - 응답 없이 멈춘 것으로 간주")
+                print(f"[!!!] Mega 무응답 {silence:.0f}초 - 응답 없이 멈춘 것으로 간주. 물리 확인 필요.")
                 if self.cfg.aws_enabled and self.current_task is not None:
                     self.cloud_sync.try_send(
                         self.cloud.post_response,
@@ -140,7 +144,6 @@ class RobotAgent:
                         message=f"Mega silent for {silence:.0f}s - assumed hung/stopped",
                         payload={},
                     )
-                self.last_error_severity = "critical"  # 원인 불명 -> 안전하게 물리 확인 필요로 취급
             return
 
         if self.cfg.aws_enabled:
@@ -174,6 +177,69 @@ class RobotAgent:
         finally:
             self.close()
 
+    # [2026-07-16 추가] 병해충 의심 판독이 나왔을 때 호출된다. AWS에 판단 요청을 만들고
+    # 관리자가 treat(병징 확정)/ignore(오탐) 응답할 때까지 폴링하며 기다린 뒤, 그 결정에
+    # 따른 최종 status를 반환한다.
+    #   - treat: 원래 판독값 그대로 반환 -> Mega가 기존 REPLACE 등 처리를 그대로 진행
+    #   - ignore: "healthy"로 덮어써서 반환 -> Mega가 오탐으로 보고 그냥 다음 셀로 넘어감
+    # 응답 대기 시간엔 상한을 두지 않는다(관리자가 답할 때까지) - 이 시간 동안
+    # run_once()의 워치독은 self.awaiting_decision 플래그로 꺼둔다(위 참고).
+    # 안전장치: 애초에 vision_event_id가 없거나(이벤트 기록 실패) 판단 요청 생성 자체가
+    # 실패하면, 관리자에게 물어볼 방법이 없다는 뜻이므로 무한정 기다리지 않고 원래
+    # 판독값 그대로 반환한다 - 이 경우 로그를 크게 남겨서 나중에 확인 가능하게 한다.
+    def _await_admin_decision(self, status: str, vision_event_id: Optional[str]) -> str:
+        if vision_event_id is None:
+            print(f"[!!!] vision 이벤트 기록 실패로 판단 요청 불가 - 원래 판독값({status})으로 진행")
+            return status
+
+        try:
+            req = self.cloud.create_decision_request(self.cfg.robot_id, vision_event_id, status)
+        except Exception as e:
+            print(f"[!!!] 판단 요청 생성 실패 - 관리자 개입 없이 원래 판독값({status})으로 진행: {e}")
+            return status
+
+        request_id = req.get("id")
+        self.awaiting_decision = True
+        print(f"[대기] 병해충 의심({status}) 판단 요청 생성됨(id={request_id}) - 관리자 응답 대기 중...")
+
+        # [2026-07-16 추가] 관리자가 화면으로 직접 보고 판단할 수 있게, 가능하면 여기서
+        # WebRTC 라이브 스트림도 같이 띄운다. vision 소스가 mock이거나(get_shared_camera
+        # 없음) 스트림 시작 자체가 실패해도(예: aiortc 미설치, 카메라 문제) 판단 대기
+        # 자체는 막지 않는다 - 라이브 영상은 "있으면 좋은" 보조 수단이지, 이게 없다고
+        # 관리자가 판단을 못 내리는 건 아니기 때문(요청 내용만으로도 판단 가능).
+        publisher = None
+        get_shared_camera = getattr(self.vision, "get_shared_camera", None)
+        if get_shared_camera is not None:
+            try:
+                from robot.webrtc_publisher import DiseaseStreamPublisher
+
+                publisher = DiseaseStreamPublisher(self.cloud, get_shared_camera(), self.cfg.robot_id)
+                publisher.start(request_id)
+                print("[스트림] 관리자용 라이브 영상 세션 시작 시도됨")
+            except Exception as e:
+                print(f"[!] WebRTC 스트림 시작 실패(무시하고 판단 대기는 계속): {e}")
+                publisher = None
+
+        try:
+            while True:
+                time.sleep(DECISION_POLL_INTERVAL_SEC)
+                try:
+                    resolved = self.cloud.get_decision_request(request_id)
+                except Exception as e:
+                    print(f"[!] 판단 요청 조회 실패, 재시도: {e}")
+                    continue
+                if resolved and resolved.get("status") != "pending":
+                    decision = resolved.get("status")
+                    print(f"[재개] 관리자 판단 수신: {decision}")
+                    return status if decision == "resolved_treat" else "healthy"
+        finally:
+            self.awaiting_decision = False
+            if publisher is not None:
+                try:
+                    publisher.stop()
+                except Exception as e:
+                    print(f"[!] 스트림 종료 중 오류(무시): {e}")
+
     # Mega가 먼저 말 걸어오는 메시지를 계속 듣는 루프.
     # UART 읽기와 vision.read()를 전부 이 스레드 한 곳에서만 처리한다 (단일 소유자) ->
     # 다른 스레드와 시리얼 포트/TensorRT를 동시에 건드릴 일이 원천적으로 없어짐.
@@ -192,12 +258,32 @@ class RobotAgent:
 
             if msg_type == MSG_REQUEST_VISION:
                 vision = self.vision.read().to_payload()
+                status = vision.get("status")
+
+                # [2026-07-16 변경] vision 이벤트를 먼저 (필요하면) 직접 기록해서 id를
+                # 확보한다. 예전처럼 cloud_sync.try_send로 감싸면 실패시 큐에만 쌓이고
+                # id를 못 받아오는데, 병해충 의심 케이스에서는 그 id로 판단 요청을 만들어야
+                # 해서 여기서는 직접 호출한다(실패해도 무시하고 계속 진행 - 기록 실패가
+                # 로봇 동작 자체를 막으면 안 됨).
+                vision_event_id = None
+                if self.cfg.aws_enabled:
+                    try:
+                        event = self.cloud.post_vision_event(self.cfg.robot_id, vision)
+                        vision_event_id = event.get("id")
+                    except Exception as e:
+                        print(f"[!] vision 이벤트 기록 실패(무시하고 계속 진행): {e}")
+
+                # [2026-07-16 추가] 병해충 의심 판독이면, 즉시 회신하지 않고 관리자
+                # 판단을 기다린다. AWS가 꺼져 있거나 방금 이벤트 기록 자체가 실패했으면
+                # (vision_event_id 없음) 관리자한테 물어볼 방법이 없으므로 원래
+                # 판독값 그대로 진행한다.
+                if self.cfg.aws_enabled and status in DISEASE_SUSPECT_STATUSES:
+                    status = self._await_admin_decision(status, vision_event_id)
+
                 self.arduino.send_json_line({
                     "type": MSG_VISION_RESULT,
-                    "status": vision.get("status"),
+                    "status": status,
                 })
-                if self.cfg.aws_enabled:
-                    self.cloud_sync.try_send(self.cloud.post_vision_event, self.cfg.robot_id, vision)
 
             elif msg_type == MSG_PROGRESS_UPDATE:
                 # Mega가 순회 도중 "지금 몇 번 셀에서 무슨 상태인지"를 알려주는 정보성 메시지.
@@ -249,14 +335,14 @@ class RobotAgent:
                     print(f"[AWS disabled] Mega cycle complete: {msg}")
                 self.current_task = None
                 self.cycle_active = False
-                self.last_error_severity = None
 
             elif msg_type == MSG_ERROR:
-                # Mega 내부 문제로 비상 정지된 상태. 안전을 위해 cycle_active를 일부러
-                # False로 풀지 않는다 - 사람이 확인하고(필요하면 send_reset() 호출)
-                # 재시작하기 전까지 run_once()가 자동으로 새 순회를 트리거하지 않게 막아두는 것.
-                severity = msg.get("severity", "critical")  # 없으면 안전하게 critical로 간주
-                self.last_error_severity = severity
+                # Mega 내부 문제로 비상 정지된 상태.
+                # [2026-07-15 5차 수정] severity 구분/RESET 원격 복구 경로를 제거함 - 물리
+                # 센서가 없어서 "가벼운 문제"인지 소프트웨어가 확인할 방법이 없기 때문.
+                # 이제 ERROR는 항상 "사람이 직접 확인하고 전원을 재시작해야 하는 상태"로
+                # 취급한다. cycle_active를 일부러 False로 풀지 않아서, 사람이 물리적으로
+                # 확인하고 재시작하기 전까지 run_once()가 자동으로 새 순회를 트리거하지 않는다.
                 if self.cfg.aws_enabled and self.current_task is not None:
                     self.cloud_sync.try_send(
                         self.cloud.post_response,
@@ -265,7 +351,7 @@ class RobotAgent:
                         execute_task="ERROR",
                         completion_sign="ERROR",
                         message=str(msg.get("reason", "Mega reported internal error")),
-                        payload={"mega_error": msg, "severity": severity},
+                        payload={"mega_error": msg},
                     )
                 else:
-                    print(f"[!!!] Mega ERROR (severity={severity}): {msg}")
+                    print(f"[!!!] Mega ERROR: {msg}")

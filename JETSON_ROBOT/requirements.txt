@@ -15,3 +15,11 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 segmentation-models-pytorch>=0.3.4
 albumentations>=1.4.0
+# [2026-07-16 추가] 병해충 의심 판정 시 관리자에게 IMX708 라이브 영상을 WebRTC로
+# 스트리밍하기 위한 라이브러리 (robot/webrtc_publisher.py). 주의: Jetson Nano의
+# ARM+CUDA 스택에서 실제로 설치/구동되는지 아직 실기기 검증이 안 됐다 - 특히 av(PyAV)는
+# ffmpeg 네이티브 빌드에 의존하므로 Jetson에서 pip install만으로 안 될 수 있고,
+# 빌드가 필요하거나 apt로 ffmpeg-dev 계열을 먼저 깔아야 할 수도 있다. 반드시 실기기에서
+# 먼저 설치를 시도해보고 결과를 확인해야 한다.
+aiortc>=1.9.0
+av>=12.0.0

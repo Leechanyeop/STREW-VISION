@@ -12,10 +12,11 @@
 # MSG_ASSIGN_TARGET(셀 하나 지정)은 더 이상 안 쓰고 MSG_START_CYCLE(순회 시작 트리거,
 # 셀 지정 없음)로 대체한다. ASSIGN_TARGET 상수 자체는 하위 호환/문서 추적 목적으로 남겨둠.
 #
-# [2026-07-15 3차 수정] ERROR 복구 경로 추가: ERROR 메시지에 severity(minor/critical) 필드가
-# 붙고, severity가 minor일 때만 MSG_RESET으로 원격 재시작이 가능하다. critical이면 Mega가
-# RESET을 무시하고 물리 리셋(전원 재시작 등)만 받아들이도록 Mega 펌웨어 쪽에서 강제해야
-# 한다 - Jetson이 실수로 RESET을 보내도 Mega 스스로 거부하는 이중 안전장치가 목적.
+# [2026-07-15 3차 수정 -> 5차 수정에서 철회] ERROR에 severity(minor/critical) 필드를 붙이고
+# minor일 때만 MSG_RESET으로 원격 재시작하는 경로를 한때 만들었었으나, 실제 하드웨어에
+# 전류 센서/엔코더/리밋스위치 등이 하나도 없어서 "가벼운 문제인지 심각한 문제인지"를
+# 소프트웨어가 구분할 방법 자체가 없다는 게 확인되어 통째로 제거함. 이제 ERROR는 항상
+# "사람이 물리적으로 확인하고 전원을 재시작해야 하는 상태"로 취급한다(MSG_RESET 없음).
 MSG_ASSIGN_TARGET = "ASSIGN_TARGET"      # [사용 중단, START_CYCLE로 대체됨] Jetson -> Mega: 셀 하나 지정
 MSG_START_CYCLE = "START_CYCLE"          # Jetson -> Mega: 순회 시작 트리거 (셀 지정 없음 - 1~4번 전체를 Mega가 자체 관리)
 MSG_REQUEST_VISION = "REQUEST_VISION"    # Mega -> Jetson: 지금 비전 상태 확인해줘 (순회 중 셀마다 호출)
@@ -24,7 +25,6 @@ MSG_REPORT_RESULT = "REPORT_RESULT"      # Mega -> Jetson: 셀 하나 처리 결
 MSG_PROGRESS_UPDATE = "PROGRESS_UPDATE"  # Mega -> Jetson: 작업 중 셀 번호(target)+상태머신(state) 중계 보고
                                           # (응답 필요 없음, 그냥 정보 전달 - Jetson은 AWS로 릴레이만 함)
 MSG_CYCLE_COMPLETE = "CYCLE_COMPLETE"    # Mega -> Jetson: 1~4번 전체 순회 끝, 초기 위치 복귀 후 IDLE 전환. 순회당 1회.
-MSG_ERROR = "ERROR"                      # Mega -> Jetson: 내부 문제로 비상 정지(ERROR 상태).
-                                          # 필드: reason(선택, 문자열), severity(선택, "minor"|"critical" - 없으면 critical로 간주)
-MSG_RESET = "RESET"                      # Jetson -> Mega: ERROR에서 복구해 IDLE로 돌아가라는 원격 재시작 요청.
-                                          # severity가 "minor"였던 경우에만 유효 - critical이면 Mega가 반드시 무시해야 함.
+MSG_ERROR = "ERROR"                      # Mega -> Jetson: 내부 문제로 비상 정지(ERROR 상태). 항상 물리 리셋(전원
+                                          # 재시작 등)으로만 복구 가능 - 원격 재시작 메시지는 없음(severity 구분 불가로 제거됨).
+                                          # 필드: reason(선택, 문자열) - 사람이 원인 파악할 때 참고용.

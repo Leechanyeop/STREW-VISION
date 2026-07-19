@@ -32,13 +32,14 @@ class CsiCameraVisionSource(VisionSource):
     ) -> None:
         
         import cv2
+        from ai.detector.frame_hub import SharedFrameCamera
 
         self.cv2 = cv2
-        self.capture = cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
-        if not self.capture.isOpened():
-            raise RuntimeError(f"CSI camera open failed: index={camera_index}")
+        # [2026-07-16 변경] 카메라 캡처 자체는 이제 SharedFrameCamera(백그라운드 스레드)가
+        # 전담한다 - 병해충 의심 판정 시 WebRTC 라이브 스트리밍이 같은 카메라를 동시에
+        # 봐야 해서, capture.read()를 직접 부르는 대신 공유 최신 프레임을 읽어온다.
+        # (자세한 이유는 ai/detector/frame_hub.py 모듈 docstring 참고.)
+        self.shared_camera = SharedFrameCamera(cv2, camera_index, frame_width, frame_height)
         self.yolo_model_path = yolo_model_path
 
         # tensorrt/pycuda는 여기서만(=yolo_model_path가 있을 때만) import한다.
@@ -47,9 +48,9 @@ class CsiCameraVisionSource(VisionSource):
         # 없을 수 있음. 모듈 최상단에 import 해두면 mock 모드조차 이 파일을 import하는
         # 순간 죽어버리므로, "진짜 카메라 쓸 때만" 필요한 시점에 import한다.
         if self.yolo_model_path:
-            import tensorrt as trt
-            import pycuda.driver as cuda
-            import pycuda.autoinit  # noqa: F401  (CUDA context를 현재 스레드에 자동 생성/등록)
+            import tensorrt as trt  # type: ignore
+            import pycuda.driver as cuda  # type: ignore
+            import pycuda.autoinit  # type: ignore  # noqa: F401  (CUDA context를 현재 스레드에 자동 생성/등록)
 
             try:
                 trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -97,8 +98,8 @@ class CsiCameraVisionSource(VisionSource):
 
     # 프레임읽고 가장큰 물체 잡아서 돌려줌
     def read(self) -> VisionResult:
-        ok, frame = self.capture.read()
-        if not ok or frame is None:
+        frame = self.shared_camera.get_latest_frame()
+        if frame is None:
             return VisionResult(label=None)
         if self.yolo_model_path:
             return self._read_with_yolo_placeholder(frame)
@@ -151,7 +152,15 @@ class CsiCameraVisionSource(VisionSource):
 
     # 카메라 닫음
     def close(self) -> None:
-        self.capture.release()
+        self.shared_camera.close()
+
+    # [2026-07-16 추가] WebRTC publisher(robot/webrtc_publisher.py)가 병해충 의심
+    # 판정으로 관리자 라이브 스트림을 열어야 할 때, YOLO 추론이 쓰는 것과 "같은"
+    # 카메라 캡처(SharedFrameCamera)를 그대로 넘겨받기 위한 접근자. 새 cv2.VideoCapture를
+    # 또 여는 게 아니라 이미 떠 있는 캡처를 공유하는 것이 핵심 - 자세한 이유는
+    # frame_hub.py 참고.
+    def get_shared_camera(self) -> "SharedFrameCamera":
+        return self.shared_camera
 
 #일반 함수
 def create_vision_source(

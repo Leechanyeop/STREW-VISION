@@ -1,14 +1,14 @@
-# Jetson-AWS-Mega 통합 계획 (2026-07-15 4차 개정 반영)
+# Jetson-AWS-Mega 통합 계획 (2026-07-15 5차 개정 반영)
 
-이전 버전은 아키텍처 전환의 1차 개정(결정권만 Mega로 이전)까지만 반영되어 있었다. 그 사이 2~4차 개정(진행상황 중계, 순회 사이클 관리, ERROR 복구+워치독)이 이어져 확정됐다. 이 버전은 그 전체를 반영한다.
+이전 버전은 아키텍처 전환의 1차 개정(결정권만 Mega로 이전)까지만 반영되어 있었다. 그 사이 2~5차 개정(진행상황 중계, 순회 사이클 관리, ERROR 복구+워치독 도입, severity/RESET 단순화)이 이어져 확정됐다. 이 버전은 그 전체를 반영한다.
 
 ## 역할 분담 (2026-07-15 최종 — 이전 버전과 반대 방향)
 
 - **AWS 서버** (이 저장소에는 포함되어 있지 않음): 작업 큐, 대시보드, 승인 워크플로, 장기 로그를 소유. **변경 없음.**
 - **Jetson** (`JETSON_ROBOT`, 이 저장소): AWS와 Mega 사이의 현장 게이트웨이. 작업을 받아와 Mega에 **순회 시작만 트리거**하고(셀 지정 없음), Mega가 요청할 때마다 카메라로 상태를 확인해 **날것 결과만** 알려주고, Mega가 중계하는 진행상황·최종 결과·오류를 그대로 AWS에 릴레이한다. 추가로 **Mega가 응답 없이 멈췄는지 감시(워치독)**하는 역할도 맡는다. **"무엇을 할지"도, "언제 몇 번 셀로 갈지"도 결정하지 않는다** — 이전 버전과 정반대.
-- **Arduino Mega**: 실시간 모터/그리퍼/센서 제어는 그대로이고, 여기에 더해 **REPLACE/OBSERVE/SKIP 판단(Decision)** 뿐 아니라 **1~4번 셀 전체 순회 사이클 관리**(IDLE/RUN/ERROR 상태머신, 순회 시작~복귀~재대기)까지 Mega가 자체적으로 한다. Jetson에 먼저 말을 걸어(비전 확인 요청, 진행상황 보고) 필요한 정보를 주고받은 뒤 스스로 판단·순회·실행한다. 내부 오류 시 `severity`(minor/critical)를 스스로 판정해 보고해야 하고, critical일 때는 원격 `RESET`을 반드시 자체 거부해야 한다(물리 리셋만 유효) — 이전 버전의 "Mega는 명령받기 전엔 절대 스스로 움직이지 않는다"는 원칙이 완전히 폐기됨.
+- **Arduino Mega**: 실시간 모터/그리퍼/센서 제어는 그대로이고, 여기에 더해 **REPLACE/OBSERVE/SKIP 판단(Decision)** 뿐 아니라 **1~4번 셀 전체 순회 사이클 관리**(IDLE/RUN/ERROR 상태머신, 순회 시작~복귀~재대기)까지 Mega가 자체적으로 한다. Jetson에 먼저 말을 걸어(비전 확인 요청, 진행상황 보고) 필요한 정보를 주고받은 뒤 스스로 판단·순회·실행한다. 내부 오류 시 `ERROR`로 보고하면 되고, 복구는 항상 사람이 물리적으로 확인 후 전원을 재시작하는 방식뿐이다(`severity` 구분 + 원격 `RESET` 경로는 물리 센서가 없어 도입 후 제거됨) — 이전 버전의 "Mega는 명령받기 전엔 절대 스스로 움직이지 않는다"는 원칙이 완전히 폐기됨.
 
-## 실제 확정된 Jetson↔Mega 프로토콜 (8종, 최종)
+## 실제 확정된 Jetson↔Mega 프로토콜 (7종, 최종)
 
 자세한 건 `ARDUINO_MEGA2560_프로토콜.md` 참고. 요약:
 
@@ -20,8 +20,7 @@
 | `PROGRESS_UPDATE` | Mega→Jetson | `target`, `state`, `progress` | 정보성, 응답 불필요 |
 | `REPORT_RESULT` | Mega→Jetson | `target`, `execute_task`, `completion`, `success` | 셀 하나당, 순회당 최대 4회 |
 | `CYCLE_COMPLETE` | Mega→Jetson | 없음 | 순회당 1회, IDLE 복귀 신호 |
-| `ERROR` | Mega→Jetson | `reason`(선택), `severity`(minor\|critical, 기본 critical) | 최상위 상태 ERROR 진입 |
-| `RESET` | Jetson→Mega | 없음 | `severity=minor`일 때만 전송, critical이면 Mega가 자체 거부 |
+| `ERROR` | Mega→Jetson | `reason`(선택) | 최상위 상태 ERROR 진입. 복구는 항상 물리 리셋(전원 재시작 등) — 원격 재시작 메시지는 없음(`severity`/`RESET`은 도입 후 5차 개정에서 제거됨, 물리 센서가 없어 심각도 구분 불가) |
 
 (`ASSIGN_TARGET`은 1차 개정에서 쓰였던 단일 셀 지정 메시지 — `START_CYCLE`로 대체되어 폐기됨, 상수만 추적용 보존)
 
@@ -46,12 +45,12 @@
 - push 방식(MQTT) — **부분 완료.** `cloud/mqtt.py`의 `MqttClient`가 비상정지 수신용으로 구현됨(작업 큐 push는 아님, REST 폴링은 그대로 유지).
 - `/robot/progress` 엔드포인트 재활용 — **해결됨.** `PROGRESS_UPDATE` 메시지로 3차 개정에서 다시 쓰이게 됨.
 - Mega가 `REQUEST_VISION` 보냈는데 Jetson이 응답을 못 주는 경우 — **부분 해결.** `vision.read()` 자체의 타임아웃은 아직 미구현(다음 우선순위). 다만 Mega가 아예 응답을 멈추는 반대 방향 실패는 Jetson 측 무응답 워치독(`MEGA_SILENCE_TIMEOUT_SEC`)으로 커버됨.
-- ERROR 복구 흐름 — **완료.** `severity` 필드 + `RESET` 메시지 + Mega 측 critical 자체 거부(이중 안전장치)로 설계 확정. Mega 펌웨어 반영은 아직(외부 개발자 몫).
+- ERROR 복구 흐름 — **완료(단순화됨).** 처음엔 `severity` 필드 + `RESET` 메시지로 설계했으나, 물리 센서가 없어 Mega가 심각도를 구분할 근거가 없다는 게 확인되어 제거. 지금은 ERROR = 항상 물리 리셋(전원 재시작 등)으로만 복구. Mega 펌웨어 반영은 아직(외부 개발자 몫, 이제 오히려 더 단순해짐).
 - AWS 서버 자체 구현 — 여전히 착수 안 됨.
 
 ## 다음 순서
 
-1. Mega 펌웨어에 신규 프로토콜(8종 메시지 + IDLE/RUN/ERROR + severity 판정 + critical RESET 거부) 반영(시간 될 때, 최우선순위 아님) — 외부 개발자에게 PDF(v4)로 안내 완료.
+1. Mega 펌웨어에 신규 프로토콜(7종 메시지 + IDLE/RUN/ERROR, ERROR는 항상 물리 리셋) 반영(시간 될 때, 최우선순위 아님) — 외부 개발자에게 안내 예정(PDF v5).
 2. AWS 서버를 실제로 만들 때 위 4개 엔드포인트 기준으로 구현 — `/robot/progress`도 이제 실제로 쓰이니 함께 구현.
 3. 서버 준비되면 `.env`의 `AWS_ENABLED=true`로 전환해 mock 없이 end-to-end 검증.
 4. `vision.read()` 타임아웃 구현, YOLO 실제 추론 연결(팀원 ONNX 대기), 승인 워크플로는 이후 다시 논의.

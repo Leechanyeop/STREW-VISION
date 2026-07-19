@@ -2,7 +2,7 @@
 
 대상 폴더: `C:\STREW_VISION\JETSON_ROBOT`
 
-> 이전 버전(v4)은 아키텍처 전환의 1차 개정(결정권만 Mega로 이전, `ASSIGN_TARGET` 단일 셀 지정)까지만 반영되어 있었다. 그 사이 실시간으로 2~4차 개정이 추가로 진행되어: (2차) Mega가 작업 중 셀 번호+상태를 `PROGRESS_UPDATE`로 중계, (3차) 1~4번 셀 전체 순회 사이클 자체를 Mega가 관리(`START_CYCLE`/`CYCLE_COMPLETE`, IDLE/RUN/ERROR 최상위 상태), (4차) ERROR에 `severity` 필드 + `RESET` 복구 경로 + Jetson 측 무응답 워치독 + 시리얼 쓰기 Lock까지 확정됨. 이번 버전은 이 전부를 반영한다.
+> 이전 버전(v4)은 아키텍처 전환의 1차 개정(결정권만 Mega로 이전, `ASSIGN_TARGET` 단일 셀 지정)까지만 반영되어 있었다. 그 사이 실시간으로 2~5차 개정이 추가로 진행되어: (2차) Mega가 작업 중 셀 번호+상태를 `PROGRESS_UPDATE`로 중계, (3차) 1~4번 셀 전체 순회 사이클 자체를 Mega가 관리(`START_CYCLE`/`CYCLE_COMPLETE`, IDLE/RUN/ERROR 최상위 상태), (4차) ERROR에 `severity` 필드 + `RESET` 복구 경로 + Jetson 측 무응답 워치독 + 시리얼 쓰기 Lock 추가, (5차) 물리 센서가 없어 severity 구분이 불가능하다는 게 확인되어 `severity`/`RESET`을 통째로 제거하고 "ERROR는 항상 물리 리셋"으로 단순화. 이번 버전은 이 전부를 반영한다.
 
 ## 1. 이 폴더는 무엇인가?
 
@@ -20,8 +20,8 @@ AWS/API 서버 (또는 mock)
   -> Mega: 셀 하나 끝날 때마다 REPORT_RESULT (순회당 최대 4회)
   -> Jetson: 그 결과를 그대로 AWS에 post_response로 릴레이 (AWS_ENABLED일 때만)
   -> Mega: 4번 셀까지 다 돌고 초기 위치 복귀하면 CYCLE_COMPLETE 전송 -> IDLE 복귀
-  -> (오류 시) Mega: ERROR(reason, severity) 전송 -> severity=minor면 Jetson이 RESET 전송 가능,
-             critical이면 물리 리셋만 유효(Mega가 스스로 RESET 거부해야 함)
+  -> (오류 시) Mega: ERROR(reason) 전송 -> 항상 물리 리셋(전원 재시작 등)으로만 복구
+             (severity 구분/원격 RESET은 5차 개정에서 제거됨 - 물리 센서가 없어 구분 불가)
   -> (Mega가 아예 응답을 멈추면) Jetson: 120초간 무응답 시 워치독이 critical 실패로 간주, AWS에 TIMEOUT 보고
 ```
 
@@ -52,8 +52,8 @@ JETSON_ROBOT
 
 | 파일 | 상태 | 설명 |
 |---|---|---|
-| `state_machine.py` | 재작성됨(4차) | `RobotAgent`. `run_once()`는 이미 순회 중이 아닐 때만 `START_CYCLE` 전송 + 무응답 워치독 검사. `_uart_listener_loop()`가 `__init__`에서 스레드로 시작되어 `REQUEST_VISION`/`PROGRESS_UPDATE`/`REPORT_RESULT`/`CYCLE_COMPLETE`/`ERROR`를 비동기 처리 — UART 읽기와 `vision.read()`를 이 스레드 하나만 담당(단일 소유자). `send_reset()`으로 `severity=minor`일 때만 `RESET` 전송 가능. |
-| `command.py` | 정리됨 | `MSG_START_CYCLE`/`MSG_REQUEST_VISION`/`MSG_VISION_RESULT`/`MSG_PROGRESS_UPDATE`/`MSG_REPORT_RESULT`/`MSG_CYCLE_COMPLETE`/`MSG_ERROR`/`MSG_RESET`(신규 8종) + `MSG_ASSIGN_TARGET`(폐기, 상수만 추적용 보존). 구버전 `ArduinoCommand` 데이터클래스는 참조 없음 확인 후 **삭제됨**(2026-07-15). |
+| `state_machine.py` | 재작성됨(5차) | `RobotAgent`. `run_once()`는 이미 순회 중이 아닐 때만 `START_CYCLE` 전송 + 무응답 워치독 검사. `_uart_listener_loop()`가 `__init__`에서 스레드로 시작되어 `REQUEST_VISION`/`PROGRESS_UPDATE`/`REPORT_RESULT`/`CYCLE_COMPLETE`/`ERROR`를 비동기 처리 — UART 읽기와 `vision.read()`를 이 스레드 하나만 담당(단일 소유자). ERROR는 항상 물리 리셋으로만 복구(원격 `send_reset()`은 5차 개정에서 제거됨). |
+| `command.py` | 정리됨 | `MSG_START_CYCLE`/`MSG_REQUEST_VISION`/`MSG_VISION_RESULT`/`MSG_PROGRESS_UPDATE`/`MSG_REPORT_RESULT`/`MSG_CYCLE_COMPLETE`/`MSG_ERROR`(신규 7종) + `MSG_ASSIGN_TARGET`(폐기, 상수만 추적용 보존). `MSG_RESET`은 4차 개정에서 도입했다가 5차 개정에서 제거됨. 구버전 `ArduinoCommand` 데이터클래스는 참조 없음 확인 후 **삭제됨**(2026-07-15). |
 | `uart.py` | 정리됨 | `ArduinoLink`. `send_json_line()`(쓰기, `_write_lock`으로 동시 쓰기 보호), `_read_json_line()`(한 줄 읽기 — `_uart_listener_loop()` 전용, 단일 소유자). 구버전 `stream_progress()`(진행상황 스트리밍)는 새 양방향 프로토콜과 안 맞아 **삭제됨**(2026-07-15). |
 | `packet.py` | 그대로 | `encode_packet()` — JSON 인코딩 규칙만 전담. |
 | `planner.py` | **런타임 미사용, 스펙으로 보존** | `ACTION_MAP`: `healthy`→`OBSERVE`, `powdery_mildew`/`missing_plant`→`REPLACE`, 그 외→`SKIP`. Mega 펌웨어(C++)로 포팅해야 할 "정답 스펙"이자 `tests/test_decision.py` 커버리지 보존 목적으로 남겨둠 — Mega 작업 자체가 후순위라 이 파일도 그대로 유지. |
@@ -73,11 +73,11 @@ JETSON_ROBOT
 2. REQUEST_VISION: vision.read() -> VISION_RESULT로 status만 회신 (AWS_ENABLED면 post_vision_event도 호출)
 3. PROGRESS_UPDATE: AWS_ENABLED면 post_progress로 릴레이 (정보성, cycle_active/current_task 안 건드림)
 4. REPORT_RESULT: AWS_ENABLED면 post_response로 릴레이 (순회 안 끝났을 수 있어 cycle_active 그대로 둠)
-5. CYCLE_COMPLETE: post_response(CYCLE 완료)로 릴레이, current_task=None, cycle_active=False, last_error_severity=None
-6. ERROR: severity 기록(없으면 critical 간주), AWS_ENABLED면 post_response(ERROR)로 릴레이
-
-[send_reset() — 필요 시 수동/상위 로직에서 호출]
-last_error_severity == "minor"일 때만 RESET 전송 + cycle_active=False로 리셋. critical이면 거부.
+5. CYCLE_COMPLETE: post_response(CYCLE 완료)로 릴레이, current_task=None, cycle_active=False
+6. ERROR: AWS_ENABLED면 post_response(ERROR)로 릴레이. cycle_active는 계속 True로 유지 -
+   사람이 물리적으로 확인하고 전원을 재시작하기 전까지 다음 순회를 자동 트리거하지 않음
+   (원격 소프트웨어 재시작 경로는 5차 개정에서 제거됨 - 물리 센서가 없어 심각도를
+   구분할 근거가 없다는 게 확인되어, 항상 물리 리셋만 유효하도록 단순화)
 ```
 
 구버전의 `plan_task()` 호출, `ASSIGN_TARGET`(단일 셀 지정), `stream_progress()` 루프는 전부 이 흐름에서 빠졌다 — 그 판단과 순회 관리는 이제 전부 Mega 쪽 책임.
@@ -133,7 +133,7 @@ Python 버전 주의: Jetson `python3`는 3.6.9 — PEP 585 문법 불가.
 | `test_task.py` | `robot.task_manager.TaskQueue` | |
 | `tests/manual/webcam_test.py` | 독립 스크립트, `ultralytics.YOLO` 직접 사용 | `pytest -q` 전체 실행 시 `--ignore=tests/manual` 필요 |
 
-**새 아키텍처(순회 사이클 관리, ERROR/RESET, 워치독)에 대한 `state_machine.py` 자체 단위 테스트는 아직 없음** — 필요하면 추가 검토(현재는 통합 시나리오를 코드 리뷰/수동 확인으로만 검증).
+**새 아키텍처(순회 사이클 관리, ERROR/물리 리셋, 워치독)에 대한 `state_machine.py` 자체 단위 테스트는 아직 없음** — 필요하면 추가 검토(현재는 통합 시나리오를 코드 리뷰/수동 확인으로만 검증).
 
 ## 10. 정리 필요 사항 (Action Items, 2026-07-15 갱신)
 

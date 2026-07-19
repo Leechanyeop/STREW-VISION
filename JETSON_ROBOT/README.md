@@ -2,7 +2,7 @@
 
 Jetson 보드에서 도는 로봇 에이전트. AWS에서 작업을 받아오고(또는 mock으로 대체), Mega가 순회 사이클을 자체 관리하도록 시작 신호만 보내고, Mega가 요청할 때마다 카메라로 식물 상태를 확인해 날것 결과를 알려주고, Mega가 보고하는 진행상황/최종 결과/오류를 AWS로 중계한다.
 
-**2026-07-15 기준 핵심 변경(4차에 걸쳐 진행됨)**: 외부 팀 회의 결과로 REPLACE/OBSERVE/SKIP **결정 권한이 Jetson에서 Mega로 이전**되었고, 이후 순회 사이클 관리(1~4번 셀)와 ERROR 복구 경로까지 전부 Mega 쪽으로 넘어갔다. Jetson은 이제 "판단"하지 않고 (1) 순회 시작 트리거, (2) 비전 결과 제공(요청 시), (3) 진행상황/최종 결과/오류를 AWS로 릴레이, (4) Mega가 응답 없이 멈췄는지 감시(워치독)만 한다. 자세한 건 `ARDUINO_MEGA2560_프로토콜.md` 참고.
+**2026-07-15 기준 핵심 변경(5차에 걸쳐 진행됨)**: 외부 팀 회의 결과로 REPLACE/OBSERVE/SKIP **결정 권한이 Jetson에서 Mega로 이전**되었고, 이후 순회 사이클 관리(1~4번 셀)까지 전부 Mega 쪽으로 넘어갔다. Jetson은 이제 "판단"하지 않고 (1) 순회 시작 트리거, (2) 비전 결과 제공(요청 시), (3) 진행상황/최종 결과/오류를 AWS로 릴레이, (4) Mega가 응답 없이 멈췄는지 감시(워치독)만 한다. ERROR 복구는 항상 물리 리셋(전원 재시작 등)만으로 이루어진다 — 원격 소프트웨어 재시작(RESET) 경로는 도입했다가 물리 센서가 없어 심각도 구분이 불가능하다는 게 확인되어 제거했다. 자세한 건 `ARDUINO_MEGA2560_프로토콜.md` 참고.
 
 ## 실제 폴더 구조 (2026-07-15 갱신)
 
@@ -10,7 +10,7 @@ Jetson 보드에서 도는 로봇 에이전트. AWS에서 작업을 받아오고
 main.py              진입점 — Config() 생성 → RobotAgent(cfg).run_forever()
 config/              .env 기반 설정 (Config dataclass), logging.conf, uart.yaml(현재 미사용 레거시 파일)
 robot/               로봇 제어 핵심
-  command.py          MSG_* 8종 상수(신규 프로토콜). 구버전 ArduinoCommand 데이터클래스는 미사용 확인 후 삭제됨.
+  command.py          MSG_* 7종 상수(신규 프로토콜, RESET은 5차 개정에서 제거됨). 구버전 ArduinoCommand 데이터클래스는 미사용 확인 후 삭제됨.
   packet.py           JSON 인코딩 규칙만 (하드웨어 모름)
   uart.py             ArduinoLink — 시리얼 I/O. send_json_line()은 write_lock으로 동시 쓰기 보호, _read_json_line()은 단일 소유자(listener 스레드)만 호출. 구버전 stream_progress()는 신규 흐름과 안 맞아 삭제됨(레거시).
   planner.py          ACTION_MAP — 런타임에서 안 씀. Mega 펌웨어 포팅용 "정답 스펙"으로 보존(Mega 작업은 후순위)
@@ -48,9 +48,9 @@ ARDUINO_PORT=/dev/ttyUSB0  # 실제 Mega가 잡힌 포트
 
 ## 현재 상태 요약 (2026-07-15, 4차 개정 반영)
 
-- **Jetson↔Mega 프로토콜: 제어 권한 + 순회 사이클 관리 + 오류 판단까지 전부 Mega로 이전됨.** 신규 메시지 8종(`START_CYCLE`/`REQUEST_VISION`/`VISION_RESULT`/`PROGRESS_UPDATE`/`REPORT_RESULT`/`CYCLE_COMPLETE`/`ERROR`/`RESET`, `ASSIGN_TARGET`은 폐기). Jetson은 `START_CYCLE`(셀 지정 없이 "순회 시작해"만 전송)만 보내고, 1~4번 셀 순회·복귀·재시도는 전부 Mega 내부 로직. 구버전(2필드+스트리밍)은 문서에 참고용으로만 남아있음. 자세한 건 `ARDUINO_MEGA2560_프로토콜.md`.
-- **Mega 최상위 상태(IDLE/RUN/ERROR)를 Jetson이 인지한다.** `START_CYCLE`로 RUN 진입, `CYCLE_COMPLETE`로 IDLE 복귀, 내부 오류 시 `ERROR`(± `severity`) 수신. `severity="minor"`일 때만 Jetson이 `RESET`을 보낼 수 있고, `critical`이면 물리 리셋만 유효(Mega 펌웨어도 critical 상태에서 RESET을 자체 거부해야 함 — 이중 안전장치).
-- **무응답 워치독**: `cycle_active` 중 Mega로부터 `MEGA_SILENCE_TIMEOUT_SEC`(120초) 이상 아무 메시지도 없으면 Jetson이 암묵적 critical 실패로 간주하고 AWS에 `TIMEOUT`으로 보고. Mega 쪽 구현 불필요(Jetson 단독 안전장치).
+- **Jetson↔Mega 프로토콜: 제어 권한 + 순회 사이클 관리 + 오류 보고까지 전부 Mega로 이전됨.** 신규 메시지 7종(`START_CYCLE`/`REQUEST_VISION`/`VISION_RESULT`/`PROGRESS_UPDATE`/`REPORT_RESULT`/`CYCLE_COMPLETE`/`ERROR`, `ASSIGN_TARGET`은 폐기). Jetson은 `START_CYCLE`(셀 지정 없이 "순회 시작해"만 전송)만 보내고, 1~4번 셀 순회·복귀·재시도는 전부 Mega 내부 로직. 구버전(2필드+스트리밍)은 문서에 참고용으로만 남아있음. 자세한 건 `ARDUINO_MEGA2560_프로토콜.md`.
+- **Mega 최상위 상태(IDLE/RUN/ERROR)를 Jetson이 인지한다.** `START_CYCLE`로 RUN 진입, `CYCLE_COMPLETE`로 IDLE 복귀, 내부 오류 시 `ERROR` 수신. ERROR는 **항상 물리 리셋(전원 재시작 등)으로만 복구** — 한때 `severity`(minor/critical) 구분 + 원격 `RESET` 메시지 경로를 만들었으나, 물리 센서(전류/엔코더 등)가 없어 Mega가 "가벼운 문제인지 심각한 문제인지"를 스스로 판단할 근거가 없다는 게 확인되어 완전히 제거함(단순함이 곧 안전함).
+- **무응답 워치독**: `cycle_active` 중 Mega로부터 `MEGA_SILENCE_TIMEOUT_SEC`(120초) 이상 아무 메시지도 없으면 Jetson이 응답 없이 멈춘 것으로 간주하고 AWS에 `TIMEOUT`으로 보고(ERROR와 동일하게 물리 확인 필요로 취급). Mega 쪽 구현 불필요(Jetson 단독 안전장치).
 - **UART Listener Thread + 단일 소유자 원칙**: `_uart_listener_loop()`가 UART 읽기와 `vision.read()`(TensorRT)를 전담. 여기에 더해 **시리얼 쓰기는 `ArduinoLink._write_lock`으로 보호**됨(`run_once()`와 listener 스레드 양쪽에서 쓰기가 발생하므로) — 두 스레드의 쓰기가 겹쳐 바이트가 섞이는 문제 해결됨.
 - **`cloud/sync.py`, `cloud/mqtt.py` 구현 완료.** 오프라인 시 재시도 큐(`CloudSync`)와 MQTT 구독(`MqttClient`) 모두 동작함.
 - **AWS 서버 자체는 여전히 이 저장소에 없음** — `cloud/api_client.py`는 REST 호출 함수만 준비된 상태, mock 모드로만 검증됨.
@@ -60,6 +60,6 @@ ARDUINO_PORT=/dev/ttyUSB0  # 실제 Mega가 잡힌 포트
 ## 지금 시점에 남은 것 (2026-07-15 기준)
 
 1. YOLO 실제 추론 — 팀원 ONNX export 대기 중 (`config/settings.py`의 `yolo_model_path`, `models/labels.yaml` 클래스 순서도 함께 확정 필요).
-2. `mega_firmware.ino` 신규 프로토콜(8종 메시지 + IDLE/RUN/ERROR) 반영 — 후순위로 미룸, 대신 외부 개발자에게 PDF(`Jetson_Mega_프로토콜_변경_안내_v4.pdf`)로 안내 완료.
+2. `mega_firmware.ino` 신규 프로토콜(7종 메시지 + IDLE/RUN/ERROR, 항상 물리 리셋) 반영 — 후순위로 미룸, 대신 외부 개발자에게 PDF로 안내 예정(v5, ERROR severity/RESET 제거 반영).
 
 Python 3.6.9(Jetson 기본) 호환 주의 — `dict[str, Any]` 같은 PEP 585 내장 제네릭 문법은 안 되므로 `typing.Dict` 사용.
