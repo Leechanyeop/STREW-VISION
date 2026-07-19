@@ -22,7 +22,8 @@ class MqttClient:
 
         self.topic = topic  # 구독할 토픽을 저장
         try:
-            self.client.connect(broker_address, port)
+            print(f"[DEBUG] broker={broker_address}, port={port}, topic={topic}")
+            self.client.connect(broker_address, port)            
             self.client.subscribe(topic)
             self.client.loop_start()  # 비동기적으로 메시지 수신 시작
             print(f"Connected to MQTT broker at {broker_address}:{port} and subscribed to topic '{topic}'")
