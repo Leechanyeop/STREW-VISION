@@ -17,7 +17,7 @@ def _make_link(readline_return=None) -> ArduinoLink:
 def test_send_json_line_writes_once_and_returns_true():
     # send_json_line은 "쓰기 전용" — 응답을 안 읽고 성공 여부(bool)만 돌려준다.
     link = _make_link(readline_return=b"")
-    ok = link.send_json_line({"type": "START_CYCLE"})
+    ok = link.send_json_line({"cmd": "RUN", "cycle_id": "t-1"})
     assert ok is True
     link.serial.write.assert_called_once()
     link.serial.flush.assert_called_once()
@@ -27,15 +27,15 @@ def test_send_json_line_returns_false_when_no_serial():
     link = ArduinoLink.__new__(ArduinoLink)
     link._write_lock = threading.Lock()
     link.serial = None
-    assert link.send_json_line({"type": "START_CYCLE"}) is False
+    assert link.send_json_line({"cmd": "RUN", "cycle_id": "t-1"}) is False
 
 
 # 아래 _read_json_line() 테스트들은 robot/state_machine.py의 _uart_listener_loop()가
 # (단일 소유자로서) 실제로 호출하는 읽기 경로를 검증한다.
 
 def test_read_json_line_parses_valid_json():
-    link = _make_link(readline_return=b'{"type":"REQUEST_VISION"}\r\n')
-    assert link._read_json_line() == {"type": "REQUEST_VISION"}
+    link = _make_link(readline_return=b'{"event":"STATE","seq":1,"cell":1,"state":"VISION_READY"}\r\n')
+    assert link._read_json_line() == {"event": "STATE", "seq": 1, "cell": 1, "state": "VISION_READY"}
 
 
 def test_read_json_line_returns_none_when_empty():

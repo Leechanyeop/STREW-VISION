@@ -1,0 +1,35 @@
+# [2026-07-23 OTA v2.0] STREW-VISION(젯슨) 저장소 - main push 시 AWS API 호출.
+# AWS FastAPI가 대신 MQTT(robot/system/update)로 UPDATE 명령을 발행 -> 젯슨이 이 저장소를
+# git pull 하고 (필요시) 펌웨어 재플래시 후 자기 재시작.
+#
+# 필요한 GitHub Secrets (이 저장소 Settings > Secrets and variables > Actions):
+#   AWS_API_BASE : AWS 서버 주소 (예: http://13.58.164.61:8000)
+#   AWS_API_KEY  : X-API-Key 값 (AWS .env의 API_KEY와 동일)
+name: OTA Update Notify
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  notify-aws:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate date-based version
+        id: ver
+        run: echo "version=$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Call AWS OTA API (AWS publishes MQTT)
+        env:
+          BASE: ${{ secrets.AWS_API_BASE }}
+          KEY: ${{ secrets.AWS_API_KEY }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          echo "Triggering OTA: version=$VERSION"
+          curl -sS -X POST "$BASE/api/ota/update" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $KEY" \
+            -d "{\"command\":\"UPDATE\",\"version\":\"$VERSION\"}" \
+            --fail --max-time 20
+          echo ""
+          echo "Done."

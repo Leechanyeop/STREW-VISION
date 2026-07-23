@@ -1,30 +1,51 @@
-# Arduino에게 보낼 명령서(Command)를 만드는 파일입니다.
-
-# [2026-07-15] 구버전 2필드(command/target) 프로토콜의 ArduinoCommand 데이터클래스는
-# 새 프로토콜(type 기반 JSON, 아래 MSG_* 상수)로 완전히 대체되어 코드 어디서도 더 이상
-# 쓰이지 않아 삭제함(grep으로 참조 없음 확인). 구버전 필드 구조 자체는
-# ARDUINO_MEGA2560_프로토콜.md의 "구버전 프로토콜" 절에 문서로만 남아있음.
-
-# Mega <-> Jetson 메시지 종류 (새 아키텍처: 결정권이 Mega로 이동, Jetson은 요청에 응답만 함)
-# 문자열을 여기저기 하드코딩하면 오타로 다른 뜻이 될 위험이 있어서 상수로 모아둠.
+# Jetson <-> Mega UART 메시지 상수.
 #
-# [2026-07-15 2차 수정] Mega가 1~4번 셀 "전체 순회"를 자체 관리하는 것으로 확정됨에 따라
-# MSG_ASSIGN_TARGET(셀 하나 지정)은 더 이상 안 쓰고 MSG_START_CYCLE(순회 시작 트리거,
-# 셀 지정 없음)로 대체한다. ASSIGN_TARGET 상수 자체는 하위 호환/문서 추적 목적으로 남겨둠.
+# [2026-07-21 UART Protocol v1.0 전면 교체]
+# 구버전(type 기반: START_CYCLE/REQUEST_VISION/VISION_RESULT/...)에서
+# STREW_VISION UART Communication Protocol Specification v1.0으로 전환.
 #
-# [2026-07-15 3차 수정 -> 5차 수정에서 철회] ERROR에 severity(minor/critical) 필드를 붙이고
-# minor일 때만 MSG_RESET으로 원격 재시작하는 경로를 한때 만들었었으나, 실제 하드웨어에
-# 전류 센서/엔코더/리밋스위치 등이 하나도 없어서 "가벼운 문제인지 심각한 문제인지"를
-# 소프트웨어가 구분할 방법 자체가 없다는 게 확인되어 통째로 제거함. 이제 ERROR는 항상
-# "사람이 물리적으로 확인하고 전원을 재시작해야 하는 상태"로 취급한다(MSG_RESET 없음).
-MSG_ASSIGN_TARGET = "ASSIGN_TARGET"      # [사용 중단, START_CYCLE로 대체됨] Jetson -> Mega: 셀 하나 지정
-MSG_START_CYCLE = "START_CYCLE"          # Jetson -> Mega: 순회 시작 트리거 (셀 지정 없음 - 1~4번 전체를 Mega가 자체 관리)
-MSG_REQUEST_VISION = "REQUEST_VISION"    # Mega -> Jetson: 지금 비전 상태 확인해줘 (순회 중 셀마다 호출)
-MSG_VISION_RESULT = "VISION_RESULT"      # Jetson -> Mega: 날것 status만 회신 (판단 없음)
-MSG_REPORT_RESULT = "REPORT_RESULT"      # Mega -> Jetson: 셀 하나 처리 결과 보고 (Jetson이 AWS로 릴레이). 순회당 최대 4회.
-MSG_PROGRESS_UPDATE = "PROGRESS_UPDATE"  # Mega -> Jetson: 작업 중 셀 번호(target)+상태머신(state) 중계 보고
-                                          # (응답 필요 없음, 그냥 정보 전달 - Jetson은 AWS로 릴레이만 함)
-MSG_CYCLE_COMPLETE = "CYCLE_COMPLETE"    # Mega -> Jetson: 1~4번 전체 순회 끝, 초기 위치 복귀 후 IDLE 전환. 순회당 1회.
-MSG_ERROR = "ERROR"                      # Mega -> Jetson: 내부 문제로 비상 정지(ERROR 상태). 항상 물리 리셋(전원
-                                          # 재시작 등)으로만 복구 가능 - 원격 재시작 메시지는 없음(severity 구분 불가로 제거됨).
-                                          # 필드: reason(선택, 문자열) - 사람이 원인 파악할 때 참고용.
+# 핵심 변화:
+#   - 필드명 분리: Jetson->Mega는 "cmd", Mega->Jetson은 "event"
+#   - STATE->ACK 핸드셰이크: Mega는 각 상태 완료를 STATE로 보고하고,
+#     Jetson의 ACK(같은 seq)를 받아야 다음 상태로 진행한다.
+#   - PING/PONG 하트비트: Jetson이 1초 주기로 PING, Mega는 즉시 PONG.
+#     3회 연속 무응답이면 Mega Offline 판정 (기존 120초 침묵 워치독 대체).
+#   - VISION_READY: STATE 중 특수 지점. "완료 보고"가 아니라 "AI 요청 동기화 지점".
+#     Mega가 촬영 준비 완료(VISION_READY STATE)를 보내면, Jetson이 AI 판독 후
+#     TASK(OBSERVE/REPLACE/SKIP)를 내려줘야 Mega가 물리 동작을 시작한다.
+#   - cycle_id: RUN에 실린다. AWS task id를 그대로 쓴다.
+#   - RESUME(복구)은 이번 범위에서 제외 - 다음 단계에서 별도 구현.
+
+# ---- Jetson -> Mega (cmd) ----
+CMD_RUN = "RUN"        # 새 Cycle 시작. 필드: cycle_id
+CMD_RESUME = "RESUME"  # [미구현/예약] 복구 재개. 필드: cell, task, state
+CMD_ACK = "ACK"        # STATE 저장 완료 통보. 필드: seq
+CMD_TASK = "TASK"      # AI/관리자가 결정한 작업 전달. 필드: task (OBSERVE/REPLACE/SKIP)
+CMD_PING = "PING"      # 하트비트 요청
+
+# ---- Mega -> Jetson (event) ----
+EV_READY = "READY"        # 부팅/리셋 완료. Jetson은 이걸 받고 RUN(또는 RESUME)을 보낸다.
+EV_STATE = "STATE"        # 상태 완료 보고. 필드: seq, cell, state
+EV_COMPLETE = "COMPLETE"  # 현재 Cell 작업 전부 완료
+EV_ERROR = "ERROR"        # 내부 런타임 에러. 필드: code
+EV_PONG = "PONG"          # PING 응답
+
+# VISION_READY: STATE의 state 값 중 특수 동기화 지점 (AI 요청 트리거).
+STATE_VISION_READY = "VISION_READY"
+
+# TASK 종류
+TASK_OBSERVE = "OBSERVE"
+TASK_REPLACE = "REPLACE"
+TASK_SKIP = "SKIP"
+
+# vision.read()의 status -> TASK 매핑 (구 planner.py ACTION_MAP과 동일).
+# healthy -> OBSERVE, powdery_mildew/missing_plant -> REPLACE, 그 외 -> SKIP.
+STATUS_TO_TASK = {
+    "healthy": TASK_OBSERVE,
+    "powdery_mildew": TASK_REPLACE,
+    "missing_plant": TASK_REPLACE,
+}
+
+
+def status_to_task(status: str) -> str:
+    return STATUS_TO_TASK.get(status, TASK_SKIP)

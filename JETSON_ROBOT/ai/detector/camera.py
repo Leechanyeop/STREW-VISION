@@ -47,10 +47,20 @@ class CsiCameraVisionSource(VisionSource):
         # 실제로 깔린 환경에만 있고, mock 모드나 이 프로젝트를 pytest로 돌리는 개발 PC에는
         # 없을 수 있음. 모듈 최상단에 import 해두면 mock 모드조차 이 파일을 import하는
         # 순간 죽어버리므로, "진짜 카메라 쓸 때만" 필요한 시점에 import한다.
+        # [2026-07-18] YOLOv8 추론 파라미터는 전역 설정에서 읽는다 (환경변수로 조절 가능).
+        from config.settings import settings as _s
+        self.yolo_conf_threshold = _s.yolo_conf_threshold
+        self.yolo_iou_threshold = _s.yolo_iou_threshold
+        self.yolo_input_size = _s.yolo_input_size
+        self.yolo_class_names = _s.yolo_class_names
+
         if self.yolo_model_path:
             import tensorrt as trt  # type: ignore
             import pycuda.driver as cuda  # type: ignore
             import pycuda.autoinit  # type: ignore  # noqa: F401  (CUDA context를 현재 스레드에 자동 생성/등록)
+
+            # read() 경로(_read_with_yolo)에서 memcpy/stream을 써야 하므로 모듈 참조를 보관.
+            self.cuda = cuda
 
             try:
                 trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -75,6 +85,10 @@ class CsiCameraVisionSource(VisionSource):
                 self.device_outputs = []
                 self.bindings = []
 
+                # [#18 리뷰 노트] get_binding_shape/binding_is_input/max_batch_size는
+                # TensorRT 8.5+에서 제거된 구식 API지만, Jetson Nano(JetPack 4.x)의
+                # TRT 8.2에서는 정상 동작한다. Nano를 벗어나 TRT를 올리게 되면
+                # engine.get_tensor_shape()/get_tensor_mode() 계열로 바꿔야 한다.
                 for binding in self.engine:
                     size = trt.volume(self.engine.get_binding_shape(binding)) * self.engine.max_batch_size
                     dtype = trt.nptype(self.engine.get_binding_dtype(binding))
@@ -102,7 +116,7 @@ class CsiCameraVisionSource(VisionSource):
         if frame is None:
             return VisionResult(label=None)
         if self.yolo_model_path:
-            return self._read_with_yolo_placeholder(frame)
+            return self._read_with_yolo(frame)
         return self._read_by_simple_contour(frame)
 
     # 임시탐지 로직 
@@ -142,13 +156,59 @@ class CsiCameraVisionSource(VisionSource):
             height=h,
         )
 
-    # 실제 YOLO 추론을 넣을 자리
-    # 카메라 프레임 여러번 불릴때 마다 
-    # 이미로딩된 엔진으로 추론만 해야됨
-    def _read_with_yolo_placeholder(self, frame) -> VisionResult:
-        # YOLO inference will replace this contour fallback when the detector is wired.
-        # yolo 추론코드로 대체됨 
-        return self._read_by_simple_contour(frame)
+    # [2026-07-18] 실제 YOLOv8 TensorRT 추론 (#19 완료 - placeholder 대체).
+    # __init__에서 이미 로딩된 엔진/버퍼를 매 프레임 재사용한다 - 여기서는 추론만.
+    def _read_with_yolo(self, frame) -> VisionResult:
+        import numpy as np
+        from ai.detector.yolo_postprocess import (
+            best_detection_to_frame_coords,
+            decode_yolov8_output,
+            letterbox_params,
+            nms,
+        )
+
+        frame_h, frame_w = frame.shape[:2]
+        s = self.yolo_input_size
+
+        # 1) 전처리: letterbox(비율 유지 + 회색 패딩) -> RGB -> CHW -> 0~1 정규화
+        scale, pad_x, pad_y = letterbox_params(frame_w, frame_h, s)
+        new_w, new_h = int(round(frame_w * scale)), int(round(frame_h * scale))
+        resized = self.cv2.resize(frame, (new_w, new_h))
+        canvas = np.full((s, s, 3), 114, dtype=np.uint8)  # YOLO 관례상 114 회색 패딩
+        canvas[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized
+        rgb = canvas[:, :, ::-1]                      # BGR -> RGB
+        chw = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+
+        # 2) 엔진 실행: host 입력 버퍼에 복사 -> GPU -> 추론 -> 출력 회수
+        np.copyto(self.host_inputs[0], chw.ravel().astype(self.host_inputs[0].dtype))
+        self.cuda.memcpy_htod_async(self.device_inputs[0], self.host_inputs[0], self.stream)
+        self.context.execute_async_v2(self.bindings, self.stream.handle)
+        for host_out, device_out in zip(self.host_outputs, self.device_outputs):
+            self.cuda.memcpy_dtoh_async(host_out, device_out, self.stream)
+        self.stream.synchronize()
+
+        # 3) 후처리: (4+nc, 8400) 디코드 -> NMS -> 최고 confidence 1개 -> 원본 좌표
+        num_classes = len(self.yolo_class_names)
+        raw = np.asarray(self.host_outputs[0]).reshape(4 + num_classes, -1)
+        detections = decode_yolov8_output(raw, num_classes, self.yolo_conf_threshold)
+        kept = nms(detections, self.yolo_iou_threshold)
+        best = best_detection_to_frame_coords(kept, frame_w, frame_h, s)
+        if best is None:
+            return VisionResult(label=None)
+
+        conf, cls, x_center, y_center, width, height = best
+        class_name = self.yolo_class_names[cls] if 0 <= cls < num_classes else str(cls)
+        return VisionResult(
+            label=class_name,
+            confidence=round(conf, 3),
+            x_center=x_center,
+            y_center=y_center,
+            width=width,
+            height=height,
+            # 학습 클래스가 곧 상태값(healthy/powdery_mildew/missing_plant/empty_cell)이라
+            # status에 그대로 넣는다 - planner가 이 값으로 판단요청 여부를 결정한다.
+            status=class_name,
+        )
 
     # 카메라 닫음
     def close(self) -> None:
