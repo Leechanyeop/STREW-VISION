@@ -18,11 +18,13 @@ OK, WARN, FAIL = "  [OK ]", "  [WARN]", "  [FAIL]"
 
 
 def run(args, cwd=None):
+    # stdout과 stderr를 분리해서 돌려준다. (예전엔 둘을 합쳐서 반환했는데, git이 stderr로
+    # 경고를 뱉으면 stdout 값 비교(out == "true")가 깨지는 버그가 있었다.)
     try:
         r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=15)
-        return r.returncode, (r.stdout + r.stderr).strip()
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
     except Exception as e:
-        return 1, str(e)
+        return 1, "", str(e)
 
 
 def main() -> int:
@@ -39,26 +41,29 @@ def main() -> int:
     problems = 0
 
     # 1) git 저장소 + origin
-    rc, out = run(["git", "rev-parse", "--is-inside-work-tree"], cwd=repo)
-    if rc == 0 and out == "true":
+    rc, out, err = run(["git", "rev-parse", "--is-inside-work-tree"], cwd=repo)
+    if rc == 0 and "true" in out:          # stdout에 true가 있으면 OK (경고 섞여도 안전)
         print(f"{OK} git 저장소 인식")
-        rc2, remote = run(["git", "remote", "get-url", "origin"], cwd=repo)
+        rc2, remote, _ = run(["git", "remote", "get-url", "origin"], cwd=repo)
         print(f"{OK if rc2 == 0 else FAIL} origin: {remote if rc2 == 0 else '없음'}")
         if rc2 != 0:
             problems += 1
-        rc3, _ = run(["git", "fetch", "--dry-run", "origin"], cwd=repo)
+        rc3, _, _ = run(["git", "fetch", "--dry-run", "origin"], cwd=repo)
         if rc3 == 0:
             print(f"{OK} origin fetch 가능(네트워크/권한 OK)")
         else:
             print(f"{WARN} origin fetch 실패 - 네트워크/인증 확인 필요")
     else:
-        print(f"{FAIL} git 저장소가 아님: {repo}")
+        # rc가 0이 아니면 git 출력을 보여줘서 원인(예: dubious ownership)을 바로 알 수 있게.
+        print(f"{FAIL} git 저장소가 아님: {repo}  (rc={rc}, out={out!r}, err={err!r})")
+        if "dubious ownership" in err:
+            print(f"       -> 해결: git config --global --add safe.directory {repo}")
         problems += 1
 
     # 2) arduino-cli + core
     if shutil.which("arduino-cli"):
         print(f"{OK} arduino-cli 설치됨")
-        rc, out = run(["arduino-cli", "core", "list"])
+        rc, out, _ = run(["arduino-cli", "core", "list"])
         if "arduino:avr" in out:
             print(f"{OK} arduino:avr 코어 설치됨")
         else:
