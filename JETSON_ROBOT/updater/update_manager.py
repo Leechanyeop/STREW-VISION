@@ -97,8 +97,12 @@ class UpdateManager:
         if self.runner.run(["git", "fetch", "origin"]).returncode != 0:
             return self._fail("Git Fetch Error", target_version)
 
+        # 브랜치는 하드코딩하지 않고 현재 체크아웃된 브랜치를 따른다
+        # (이 저장소는 master, 다른 환경은 main일 수 있음 - 둘 다 자동 대응).
+        branch = self._current_branch()
+
         old = self._rev("HEAD")
-        remote = self._rev("origin/main")
+        remote = self._rev(f"origin/{branch}")
         if old is None or remote is None:
             return self._fail("Git Rev Error", target_version)
         if old == remote:
@@ -110,7 +114,7 @@ class UpdateManager:
             return status
 
         # pull
-        if self.runner.run(["git", "pull", "origin", "main"]).returncode != 0:
+        if self.runner.run(["git", "pull", "origin", branch]).returncode != 0:
             return self._fail("Git Pull Error", target_version)
 
         changed = self._changed_files(old, remote)
@@ -159,6 +163,12 @@ class UpdateManager:
     def _rev(self, ref: str) -> Optional[str]:
         r = self.runner.run(["git", "rev-parse", ref])
         return r.stdout.strip() if r.returncode == 0 else None
+
+    def _current_branch(self) -> str:
+        # 현재 체크아웃된 브랜치명. detached HEAD면 안전하게 main으로 폴백.
+        r = self.runner.run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        b = r.stdout.strip() if r.returncode == 0 else ""
+        return b if b and b != "HEAD" else "main"
 
     def _changed_files(self, old: str, new: str) -> List[str]:
         r = self.runner.run(["git", "diff", "--name-only", old, new])
