@@ -18,10 +18,11 @@ OK, WARN, FAIL = "  [OK ]", "  [WARN]", "  [FAIL]"
 
 
 def run(args, cwd=None):
-    # stdout과 stderr를 분리해서 돌려준다. (예전엔 둘을 합쳐서 반환했는데, git이 stderr로
-    # 경고를 뱉으면 stdout 값 비교(out == "true")가 깨지는 버그가 있었다.)
+    # stdout/stderr 분리 반환. Python 3.6(젯슨 나노 JetPack 기본) 호환을 위해
+    # capture_output/text(3.7+) 대신 stdout=PIPE,stderr=PIPE,universal_newlines를 쓴다.
     try:
-        r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=15)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except Exception as e:
         return 1, "", str(e)

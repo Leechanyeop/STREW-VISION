@@ -26,7 +26,9 @@ class CommandRunner:
         self.cwd = cwd
 
     def run(self, args: List[str], check: bool = False) -> "subprocess.CompletedProcess":
-        return subprocess.run(args, cwd=self.cwd, capture_output=True, text=True, check=check)
+        # Python 3.6(젯슨 나노) 호환: capture_output/text(3.7+) 대신 PIPE + universal_newlines.
+        return subprocess.run(args, cwd=self.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, check=check)
 
 
 FIRMWARE_MARKER = "mega_firmware"
