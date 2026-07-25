@@ -82,6 +82,16 @@ class RobotAgent:
             update_topic=cfg.ota_update_topic if self.ota_service is not None else None,
         )
 
+        # [2026-07-25 v2.0] 상태 관리 SQLite (Source of Truth). STATE 받을 때마다 저장하고
+        # Recovery의 기준으로 삼는다. DB 초기화 실패해도 로봇 동작은 계속(무시)한다.
+        self.state_db = None
+        try:
+            from storage.state_db import StateDB
+
+            self.state_db = StateDB(cfg.state_db_path)
+        except Exception as e:
+            print(f"[SQLite] 초기화 실패(무시하고 계속): {e}")
+
         # 현재 진행 중인 Cycle의 AWS task (COMPLETE/ERROR를 이 task_id로 릴레이).
         self.current_task: Optional[Dict[str, Any]] = None
         self.cycle_active: bool = False
@@ -173,6 +183,8 @@ class RobotAgent:
         self.current_task = task
         self.cycle_active = True
         cycle_id = task["id"]
+        # SQLite: 새 Cycle 시작을 Source of Truth에 기록.
+        self._db_update(cycle_id=cycle_id, cell_id=None, state="RUN", status="RUNNING")
         self.arduino.send_json_line({"cmd": CMD_RUN, "cycle_id": cycle_id})
         print(f"[RUN] cycle_id={cycle_id} 전송")
 
@@ -181,6 +193,11 @@ class RobotAgent:
         seq = msg.get("seq")
         cell = msg.get("cell")
         state = msg.get("state")
+
+        # [v2.0] Source of Truth 먼저 갱신 - AWS/네트워크가 끊겨도 Recovery 가능해야 하므로
+        # AWS 릴레이보다 로컬 SQLite 저장이 우선이다.
+        cycle_id = self.current_task["id"] if self.current_task else None
+        self._db_update(cycle_id=cycle_id, cell_id=cell, state=state, status="RUNNING")
 
         # 진행상황을 AWS로 릴레이(있으면 좋은 정보 - 실패해도 무시).
         if self.cfg.aws_enabled and self.current_task is not None:
@@ -224,6 +241,9 @@ class RobotAgent:
     # COMPLETE: 현재 Cell 작업 완료. AWS로 완료 보고.
     def _on_complete(self, msg: Dict[str, Any]) -> None:
         print(f"[COMPLETE] {msg}")
+        cell = msg.get("cell")
+        cycle_id = self.current_task["id"] if self.current_task else None
+        self._db_update(cycle_id=cycle_id, cell_id=cell, state="COMPLETE", status="COMPLETE")
         if self.cfg.aws_enabled and self.current_task is not None:
             self.cloud_sync.try_send(
                 self.cloud.post_response,
@@ -234,6 +254,17 @@ class RobotAgent:
                 message="Mega cell complete",
                 payload={"mega_report": msg},
             )
+
+    # SQLite current_task 갱신 헬퍼. DB가 없거나 실패해도 로봇 동작은 절대 막지 않는다.
+    def _db_update(self, cycle_id=None, cell_id=None, state=None, task=None, view=None, status="RUNNING") -> None:
+        if self.state_db is None:
+            return
+        try:
+            self.state_db.update_current_task(
+                cycle_id=cycle_id, cell_id=cell_id, state=state, task=task, view=view, status=status
+            )
+        except Exception as e:
+            print(f"[SQLite] 상태 저장 실패(무시): {e}")
 
     # ERROR: Mega 내부 런타임 에러. AWS로 보고(에러 코드 포함).
     def _on_error(self, msg: Dict[str, Any]) -> None:

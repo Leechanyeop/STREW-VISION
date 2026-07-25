@@ -16,6 +16,10 @@ class FakeRunner:
     def run(self, args, check=False):
         self.calls.append(args)
         joined = " ".join(args)
+        # 브랜치 자동감지 호출(git rev-parse --abbrev-ref HEAD)은 항상 main으로 답한다.
+        # (스크립트의 "rev-parse HEAD" 항목과 헷갈리지 않도록 여기서 먼저 가로챈다.)
+        if "--abbrev-ref" in joined:
+            return SimpleNamespace(returncode=0, stdout="main", stderr="")
         for subs, rc, out in self.script:
             if all(s in joined for s in subs):
                 return SimpleNamespace(returncode=rc, stdout=out, stderr="" if rc == 0 else "err")

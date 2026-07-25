@@ -73,7 +73,7 @@ class Config: #모든 설정값을 담는 Config 클래스입니다.
     # 값이 없으면(기본값) False -> AWS 없이 로컬 Mock 작업만으로 동작.
     aws_enabled: bool = os.getenv("AWS_ENABLED", "false").lower() in ("1", "true", "yes")
     aws_api_base: str = os.getenv("AWS_API_BASE", "http://localhost:8000").rstrip("/")
-    api_key: str = os.getenv("API_KEY", "change-me")
+    api_key: str = os.getenv("API_KEY", "324e533b404b9cd34b44c04f3366180eebf9a66225802b0f")
 
     #AWS와 통신할 때 요청 제한 시간을 설정합니다. 기본값은 5초입니다.
     aws_timeout: float = float(os.getenv("AWS_TIMEOUT", "5.0"))
@@ -103,6 +103,9 @@ class Config: #모든 설정값을 담는 Config 클래스입니다.
         "OTA_FIRMWARE_SKETCH",
         os.path.basename(os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))) + "/mega_firmware",
     )
+
+    # [2026-07-25 v2.0] Jetson 상태 관리 SQLite (Source of Truth). Recovery 기준 DB.
+    state_db_path: str = os.getenv("STATE_DB_PATH", "data/robot_state.db")
 
     arduino_port: str = os.getenv("ARDUINO_PORT", "/dev/ttyACM0")
     arduino_baudrate: int = int(os.getenv("ARDUINO_BAUDRATE", "115200"))
