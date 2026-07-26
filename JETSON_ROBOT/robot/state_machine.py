@@ -167,15 +167,21 @@ class RobotAgent:
             if event == EV_PONG:
                 self.last_pong_time = time.monotonic()
                 continue
-            if event == EV_READY:
-                self._on_ready()
-            elif event == EV_STATE:
-                self._on_state(msg)
-            elif event == EV_COMPLETE:
-                self._on_complete(msg)
-            elif event == EV_ERROR:
-                self._on_error(msg)
-            # 알 수 없는 event는 무시.
+            # 어떤 핸들러에서 예외가 나도 리스너 스레드(단일 소유자)는 죽지 않는다.
+            # 스레드가 죽으면 PONG 수신이 멈춰 Mega가 Offline으로 오판되므로,
+            # 이벤트 처리 실패는 로그만 남기고 다음 이벤트를 계속 받는다.
+            try:
+                if event == EV_READY:
+                    self._on_ready()
+                elif event == EV_STATE:
+                    self._on_state(msg)
+                elif event == EV_COMPLETE:
+                    self._on_complete(msg)
+                elif event == EV_ERROR:
+                    self._on_error(msg)
+                # 알 수 없는 event는 무시.
+            except Exception as e:
+                print(f"[UART] 이벤트 처리 오류({event}): {e} - 리스너는 계속 동작")
 
     # READY: Mega 부팅/리셋 완료.
     # [2026-07-25 Phase B] 먼저 SQLite에 미완료 작업(status=RUNNING)이 남아있는지 확인한다.
@@ -203,7 +209,13 @@ class RobotAgent:
 
         # 신규 Cycle
         if self.cfg.aws_enabled:
-            task = self.cloud.next_task(self.cfg.robot_id)
+            # AWS 조회 실패(네트워크/타임아웃)가 리스너 스레드를 죽이면 안 된다
+            # (오프라인 내성 - AWS가 끊겨도 로봇 제어는 계속). 예외를 흡수하고 RUN 보류.
+            try:
+                task = self.cloud.next_task(self.cfg.robot_id)
+            except Exception as e:
+                print(f"[READY] AWS 작업 조회 실패({e}) - RUN 보류")
+                return
             if not task:
                 print("[READY] 대기 중인 작업 없음 - RUN 보류")
                 return
@@ -245,6 +257,7 @@ class RobotAgent:
         self._db_update(cycle_id=cycle_id, cell_id=cell, state=state, status="RUNNING")
 
         # 진행상황을 AWS로 릴레이(있으면 좋은 정보 - 실패해도 무시).
+        # progress(%) = 현재 Cell / 전체 Cell 수(system_config.total_cells) * 100.
         if self.cfg.aws_enabled and self.current_task is not None:
             self.cloud_sync.try_send(
                 self.cloud.post_progress,
@@ -252,7 +265,7 @@ class RobotAgent:
                 task_id=self.current_task["id"],
                 target=f"cell_{cell}" if cell is not None else None,
                 state=state,
-                progress=0,
+                progress=self._cell_progress_percent(cell),
             )
 
         # 스펙: STATE는 반드시 ACK. VISION_READY도 ACK를 먼저 보낸다.
@@ -344,6 +357,21 @@ class RobotAgent:
             return self.state_db.get_config_int("max_view", default)
         except Exception:
             return default
+
+    def _cell_progress_percent(self, cell) -> int:
+        # 현재 Cell 번호 / 전체 Cell 수(system_config.total_cells) 로 진행도(%)를 계산한다.
+        # cell이 없으면(예: RUN 시작) 0. total_cells가 없거나 DB가 없으면 20으로 폴백.
+        if not cell:
+            return 0
+        total = 20
+        if self.state_db is not None:
+            try:
+                total = self.state_db.get_config_int("total_cells", 20)
+            except Exception:
+                total = 20
+        if total <= 0:
+            return 0
+        return min(int(round(cell / total * 100)), 100)
 
     # COMPLETE: 현재 Cell 작업 완료. AWS로 완료 보고.
     def _on_complete(self, msg: Dict[str, Any]) -> None:

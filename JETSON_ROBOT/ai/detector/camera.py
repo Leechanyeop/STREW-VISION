@@ -1,5 +1,8 @@
 from ai.detector.result import VisionResult
+import os
 import random
+
+_MOCK_STATUSES = ("healthy", "powdery_mildew", "missing_plant", "empty_cell")
 
 #실제로쓰이는 실제 AI 파이프라인이다
 class VisionSource:
@@ -9,6 +12,11 @@ class VisionSource:
 #가짜신호 개발용
 class MockVisionSource(VisionSource):
     def read(self) -> VisionResult:
+        # [테스트용] MOCK_VISION_STATUS 환경변수가 지정돼 있으면 그 status를 고정으로 쓴다.
+        #  - 예) MOCK_VISION_STATUS=powdery_mildew  -> 관리자 승인 흐름 테스트
+        #  - 값이 없거나 목록에 없으면 기존대로 랜덤.
+        forced = os.getenv("MOCK_VISION_STATUS")
+        status = forced if forced in _MOCK_STATUSES else random.choice(_MOCK_STATUSES)
         return VisionResult(
             label="mock-object",
             confidence=0.80,
@@ -16,7 +24,7 @@ class MockVisionSource(VisionSource):
             y_center=360,
             width=160,
             height=120,
-            status = random.choice(["healthy", "powdery_mildew", "missing_plant","empty_cell"])
+            status=status,
         )
 
 #진짜 카메라 연결 
