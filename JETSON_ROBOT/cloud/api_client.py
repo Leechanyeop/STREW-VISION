@@ -16,6 +16,14 @@ class CloudClient:# AWS 클라우드 API와 통신하는 클라이언트 클래�
         self.timeout = timeout
 
     # next_task 메서드는 주어진 robot_id에 대한 다음 작업을 AWS 클라우드에서 가져옵니다.
+    def create_task(self, robot_id: str, execute_task: str = "CYCLE") -> Dict[str, Any]:
+        # [자율 운영] 큐에 대기 작업이 없을 때 이 사이클용 task를 직접 생성한다.
+        # 진행도(post_progress)가 붙을 task_id를 확보하는 목적. 반환: 생성된 task(id 포함).
+        body = {"robot_id": robot_id, "execute_task": execute_task}
+        r = self.session.post(f"{self.base_url}/robot/request", json=body, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
     def next_task(self, robot_id: str) -> Optional[Dict[str, Any]]:
         r = self.session.get(f"{self.base_url}/robot/next", params={"robot_id": robot_id}, timeout=self.timeout)
         r.raise_for_status()

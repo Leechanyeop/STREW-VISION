@@ -252,11 +252,16 @@ class RobotAgent:
         if self.cfg.aws_enabled:
             try:
                 task = self.cloud.next_task(self.cfg.robot_id)
+                if not task:
+                    # 큐에 대기 작업이 없으면 이 사이클용 task를 직접 생성한다(자율 운영).
+                    # 이렇게 해야 진행도(post_progress)가 붙을 대상이 생겨 대시보드에 뜬다.
+                    task = self.cloud.create_task(self.cfg.robot_id, "CYCLE")
+                    print(f"[CYCLE] 대기 작업 없음 - 자체 생성 task={task.get('id')}")
             except Exception as e:
-                print(f"[CYCLE] AWS 작업 조회 실패({e}) - 보류")
+                print(f"[CYCLE] AWS 작업 조회/생성 실패({e}) - 보류")
                 return False
             if not task:
-                print("[CYCLE] 대기 중인 작업 없음 - 보류")
+                print("[CYCLE] task 확보 실패 - 보류")
                 return False
         else:
             task = {"id": build_mock_cycle_id()}
