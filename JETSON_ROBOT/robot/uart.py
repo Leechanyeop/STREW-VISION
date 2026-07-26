@@ -19,6 +19,8 @@ class ArduinoLink:
         # 읽기(_read_json_line)는 _uart_listener_loop() 한 곳에서만 부르므로(단일 소유자) 별도
         # Lock이 필요 없다 - 이건 "쓰기가 여러 곳에서 발생할 수 있다"는 문제만 막는 것.
         self._write_lock = threading.Lock()
+        # [2026-07-27] 수신 프레이밍 버퍼 - 조각난 시리얼 읽기를 완전한 줄로 합치는 용도.
+        self._rx_buf = b""
 
         try:
             self.serial = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
@@ -59,20 +61,34 @@ class ArduinoLink:
     # _read_json_line: 시리얼에서 한 줄을 읽어서 딕셔너리로 파싱하는 부분만 따로 뗀 헬퍼입니다.
     # bytes(원시 데이터) -> str(decode) -> dict(json.loads) 순서로 변환합니다.
     def _read_json_line(self) -> Optional[Dict[str, Any]]:
+        # [2026-07-27] 프레이밍 안정화: readline()이 타임아웃으로 줄 중간(개행 전)에 조각을
+        # 반환할 수 있어(PONG이 "{" 와 "\"event\":\"PONG\"}"로 쪼개지는 문제), 수신 버퍼(_rx_buf)에
+        # 계속 모았다가 개행(\n)이 들어온 완전한 줄만 파싱한다. 아직 줄이 안 끝났으면 None 반환(대기).
         if self.serial is None or not self.serial.is_open:
             return None
 
         try:
-            # readline()은 bytes를 반환하므로, decode()로 문자열로 바꾸고 strip()으로 개행문자를 제거합니다.
-            response = self.serial.readline().decode("utf-8", errors="replace").strip()
+            chunk = self.serial.readline()  # \n 또는 타임아웃까지의 bytes(조각일 수 있음)
         except (serial.SerialException, OSError) as e:
             print(f"시리얼 통신 오류: {e}")
             return None
 
-        if not response: # 응답이 비어 있으면(타임아웃) None을 반환합니다.
+        if chunk:
+            self._rx_buf += chunk
+
+        # 완전한 줄(\n으로 끝)이 아직 없으면 더 모은다.
+        if b"\n" not in self._rx_buf:
             return None
 
-        try: # JSON 디코딩을 시도하고, 성공하면 딕셔너리를 반환합니다.
+        # 버퍼에서 첫 완전한 줄만 꺼내고 나머지는 남겨둔다(여러 줄이 한 번에 온 경우 대비).
+        line, _, rest = self._rx_buf.partition(b"\n")
+        self._rx_buf = rest
+
+        response = line.decode("utf-8", errors="replace").strip()
+        if not response:
+            return None
+
+        try:
             return json.loads(response)
         except json.JSONDecodeError:
             print(f"JSON 디코딩 오류: {response}")

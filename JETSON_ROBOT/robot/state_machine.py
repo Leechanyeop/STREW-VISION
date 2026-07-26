@@ -31,7 +31,7 @@ from robot.uart import ArduinoLink
 # 하트비트: Jetson이 PING을 1초 주기로 보내고 Mega는 즉시 PONG. 이 시간(초) 넘게
 # PONG이 없으면 Mega Offline로 판정한다(스펙: 3회 무응답 = Offline).
 HEARTBEAT_INTERVAL_SEC = 1.0
-HEARTBEAT_TIMEOUT_SEC = 3.0
+HEARTBEAT_TIMEOUT_SEC = 5.0
 
 # 병해충 의심 판독. 즉시 TASK를 내리지 않고 AWS에 판단 요청 후 관리자 응답을 기다린다.
 DISEASE_SUSPECT_STATUSES = set(DISEASE_STATUSES)
@@ -130,8 +130,10 @@ class RobotAgent:
         # UART 읽기는 리스너 스레드 하나만 한다(단일 소유자). 쓰기는 write_lock으로 보호됨.
         self._listener = threading.Thread(target=self._uart_listener_loop, daemon=True)
         self._heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._scheduler = threading.Thread(target=self._schedule_loop, daemon=True)
         self._listener.start()
         self._heartbeat.start()
+        self._scheduler.start()
 
     # ---------------------------------------------------------------------
     # 하트비트: 1초마다 PING, HEARTBEAT_TIMEOUT_SEC 넘게 PONG 없으면 Offline.
@@ -237,23 +239,29 @@ class RobotAgent:
             print(f"[RESUME] cycle={cycle_id} cell={cell}부터 셀 단위 재개")
             return
 
-        # 신규 Cycle
+        # [Scheduler] 스케줄이 활성화돼 있으면 부팅 시 자동 순회하지 않고, 스케줄 시각을
+        # 기다린다(스케줄러 스레드가 예약 시각에 순회를 시작한다). 스케줄이 없으면 기존대로 즉시 순회.
+        if self._schedule_active():
+            print("[READY] 스케줄 모드 - 예약 시각까지 순회 대기")
+            return
+
+        self._begin_new_cycle()
+
+    def _begin_new_cycle(self) -> bool:
+        # 신규 Cycle 시작(READY 자동 / 스케줄 트리거 공용). Mega가 IDLE일 때만 의미 있음. 성공 시 True.
         if self.cfg.aws_enabled:
-            # AWS 조회 실패(네트워크/타임아웃)가 리스너 스레드를 죽이면 안 된다
-            # (오프라인 내성 - AWS가 끊겨도 로봇 제어는 계속). 예외를 흡수하고 RUN 보류.
             try:
                 task = self.cloud.next_task(self.cfg.robot_id)
             except Exception as e:
-                print(f"[READY] AWS 작업 조회 실패({e}) - RUN 보류")
-                return
+                print(f"[CYCLE] AWS 작업 조회 실패({e}) - 보류")
+                return False
             if not task:
-                print("[READY] 대기 중인 작업 없음 - RUN 보류")
-                return
+                print("[CYCLE] 대기 중인 작업 없음 - 보류")
+                return False
         else:
             task = {"id": build_mock_cycle_id()}
 
-        # [Config Sync] 새 Cycle 시작 전에 대시보드가 설정한 운영 정책값을 받아 적용한다.
-        # (Dashboard에서 total_cells/max_view 등 변경 → 다음 Cycle에 반영). 실패해도 무시.
+        # [Config Sync] 새 Cycle 시작 전에 대시보드가 설정한 운영 정책값을 받아 적용(실패 무시).
         if self.cfg.aws_enabled and self.state_db is not None:
             try:
                 desired = self.cloud.get_robot_config(self.cfg.robot_id)
@@ -267,10 +275,49 @@ class RobotAgent:
         self.current_task = task
         self.cycle_active = True
         cycle_id = task["id"]
-        # SQLite: 새 Cycle 시작을 Source of Truth에 기록.
         self._db_update(cycle_id=cycle_id, cell_id=None, state="RUN", status="RUNNING")
         self.arduino.send_json_line({"cmd": CMD_RUN, "cycle_id": cycle_id})
         print(f"[RUN] cycle_id={cycle_id} 전송")
+        return True
+
+    def _schedule_active(self) -> bool:
+        # 대시보드 Task Scheduler에 활성 스케줄(entries)이 있으면 True(부팅 자동순회 억제).
+        if not self.cfg.aws_enabled:
+            return False
+        try:
+            sch = self.cloud.get_schedule(self.cfg.robot_id)
+        except Exception:
+            return False
+        return bool(sch and sch.get("enabled", True) and (sch.get("entries") or []))
+
+    def _schedule_loop(self) -> None:
+        # 주간 스케줄(요일×시각)을 20초마다 확인해, 예약 시각(정시)에 Mega가 IDLE이면 순회 시작.
+        DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+        last_fired = None
+        while True:
+            time.sleep(20)
+            if not self.cfg.aws_enabled:
+                continue
+            try:
+                sch = self.cloud.get_schedule(self.cfg.robot_id)
+            except Exception:
+                continue
+            if not sch or not sch.get("enabled", True):
+                continue
+            entries = sch.get("entries") or []
+            if not entries:
+                continue
+            now = time.localtime()
+            day = DAYS[now.tm_wday]
+            hhmm = time.strftime("%H:00", now)   # 정시 슬롯 매칭
+            slot = f"{day}|{hhmm}"
+            if slot == last_fired:
+                continue
+            if any(e.get("day") == day and e.get("time") == hhmm for e in entries):
+                if not self.cycle_active and self.mega_online:
+                    last_fired = slot
+                    print(f"[SCHEDULE] {slot} 예약 순회 시작")
+                    self._begin_new_cycle()
 
     # SQLite에 미완료 작업이 남아있는지 확인. 있으면 그 레코드(dict)를, 없으면 None.
     # 판정: status가 RUNNING이고 실제 진행된 셀(cell_id)이 있어야 재개 의미가 있다.
@@ -432,6 +479,12 @@ class RobotAgent:
         cell = msg.get("cell")
         cycle_id = self.current_task["id"] if self.current_task else None
         self._db_update(cycle_id=cycle_id, cell_id=cell, state="COMPLETE", status="COMPLETE")
+        # 마지막 셀 완료면 Cycle 종료 → Mega가 IDLE로 돌아가므로 cycle_active를 내린다.
+        # (스케줄러가 다음 예약 시각에 순회를 재시작할 수 있게 한다.)
+        total = self.state_db.get_config_int("total_cells", 4) if self.state_db is not None else 4
+        if cell is not None and cell >= total:
+            self.cycle_active = False
+            print(f"[CYCLE] 마지막 셀({cell}/{total}) 완료 - Cycle 종료, Mega IDLE")
         if self.cfg.aws_enabled and self.current_task is not None:
             self.cloud_sync.try_send(
                 self.cloud.post_response,

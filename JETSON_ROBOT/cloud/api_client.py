@@ -129,3 +129,12 @@ class CloudClient:# AWS 클라우드 API와 통신하는 클라이언트 클래�
             if item.get("robot_id") == robot_id:
                 return item.get("config") or {}
         return {}
+
+    def get_schedule(self, robot_id: str) -> Optional[Dict[str, Any]]:
+        # [Scheduler] 대시보드 Task Scheduler의 주간 스케줄을 받아온다. 이 robot의 스케줄(dict) 또는 None.
+        r = self.session.get(f"{self.base_url}/robot/schedule", timeout=self.timeout)
+        r.raise_for_status()
+        for item in r.json().get("items", []):
+            if item.get("robot_id") == robot_id:
+                return item
+        return None

@@ -48,8 +48,9 @@ bool waitingVision = false;
 
 void sendJson(JsonDocument& doc)
 {
-    serializeJson(doc, Serial);
-    Serial.println();
+     serializeJson(doc, Serial);
+    Serial.write('\n');
+    Serial.flush();
 }
 
 
@@ -84,10 +85,7 @@ void sendRequestVision(int cell)
 // Mega → Jetson
 // ================================
 
-void sendReportResult(
-    int cell,
-    const char* task
-)
+void sendReportResult(int cell,const char* task)
 {
     StaticJsonDocument<256> doc;
 
@@ -123,10 +121,7 @@ void sendCycleComplete()
 {
     StaticJsonDocument<128> doc;
 
-
-    doc["command"] =
-        "CYCLE_COMPLETE";
-
+    doc["command"] ="CYCLE_COMPLETE";
 
     sendJson(doc);
 }
@@ -141,14 +136,12 @@ void sendError(const char* msg)
 {
     StaticJsonDocument<128> doc;
 
-
     doc["command"] = "ERROR";
-
     doc["message"] = msg;
-
 
     sendJson(doc);
 }
+
 // ================================
 // Setup
 // ================================
@@ -156,18 +149,12 @@ void sendError(const char* msg)
 void setup()
 {
     Serial.begin(115200);
-
+    Serial.setTimeout(20);
 
     lcd.init();
     lcd.backlight();
 
-
-    showMessage(
-        "STREW ROBOT",
-        "READY"
-    );
-
-
+    showMessage("STREW ROBOT","Boot READY");
     delay(1000);
 }
 
@@ -317,20 +304,16 @@ void startCycle()
 void processCommand(JsonDocument& doc)
 {
 
-    const char* command =
-        doc["command"];
+    const char* command = doc["command"];
 
 
 
     if(command == nullptr)
     {
-        sendError(
-            "NO_COMMAND"
-        );
+        sendError("NO_COMMAND");
 
         return;
     }
-
 
 
     // START_CYCLE
@@ -344,17 +327,13 @@ void processCommand(JsonDocument& doc)
 
     // VISION_RESULT
 
-    else if(
-        strcmp(command,"VISION_RESULT")==0
-    )
+    else if(strcmp(command,"VISION_RESULT")==0)
     {
         handleVisionResult(doc);
     }
 
     // PING
-    else if(
-        strcmp(command,"PING")==0
-    )
+    else if(strcmp(command,"PING")==0)
     {
         StaticJsonDocument<128> response;
 
@@ -362,36 +341,20 @@ void processCommand(JsonDocument& doc)
         response["command"] = "PING";
 
         sendJson(response);
-
-
-        showMessage(
-            "PING",
-            "PONG"
-        );
     }
 
     // STOP
 
-    else if(
-        strcmp(command,"STOP")==0
-    )
+    else if(strcmp(command,"STOP")==0)
     {
         cycleRunning=false;
 
-
-        showMessage(
-            "STOP",
-            "SYSTEM"
-        );
+        showMessage("STOP","SYSTEM");
     }
-
-
 
     else
     {
-        sendError(
-            "UNKNOWN_COMMAND"
-        );
+        sendError("UNKNOWN_COMMAND");
     }
 }
 // ================================
@@ -406,31 +369,18 @@ void loop()
     if(Serial.available())
     {
 
-        String line =
-            Serial.readStringUntil('\n');
-
+        String line = Serial.readStringUntil('\n');
 
         StaticJsonDocument<256> doc;
 
-
-        DeserializationError error =
-            deserializeJson(
-                doc,
-                line
-            );
-
-
+        DeserializationError error = deserializeJson(doc,line);
 
         if(error)
         {
-            sendError(
-                "JSON_PARSE_FAIL"
-            );
+            sendError("JSON_PARSE_FAIL");
 
             return;
         }
-
-
 
         processCommand(doc);
     }
