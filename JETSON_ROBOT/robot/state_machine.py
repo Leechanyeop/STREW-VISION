@@ -96,6 +96,18 @@ class RobotAgent:
         except Exception as e:
             print(f"[SQLite] 초기화 실패(무시하고 계속): {e}")
 
+        # [B] 부팅 시 운영 정책값(system_config)을 AWS로 1회 보고 - 대시보드 읽기전용 표시용.
+        # 실패해도 무시(오프라인 내성). Dashboard→Jetson 역방향 반영은 아직 없음(Decision 009).
+        if cfg.aws_enabled and self.state_db is not None:
+            try:
+                self.cloud_sync.try_send(
+                    self.cloud.post_robot_config,
+                    robot_id=cfg.robot_id,
+                    config=self.state_db.get_all_config(),
+                )
+            except Exception as e:
+                print(f"[Config] 설정 보고 실패(무시): {e}")
+
         # 현재 진행 중인 Cycle의 AWS task (COMPLETE/ERROR를 이 task_id로 릴레이).
         self.current_task: Optional[Dict[str, Any]] = None
         self.cycle_active: bool = False
@@ -125,9 +137,27 @@ class RobotAgent:
     # 하트비트: 1초마다 PING, HEARTBEAT_TIMEOUT_SEC 넘게 PONG 없으면 Offline.
     # ---------------------------------------------------------------------
     def _heartbeat_loop(self) -> None:
+        _status_tick = 0
         while True:
             time.sleep(HEARTBEAT_INTERVAL_SEC)
             self.arduino.send_json_line({"cmd": CMD_PING})
+
+            # [Runtime Status] 5초마다 젯슨/Mega/MQTT 연결 상태를 AWS로 보고(실패 무시).
+            _status_tick += 1
+            if _status_tick >= 5 and self.cfg.aws_enabled:
+                _status_tick = 0
+                state = "WAIT" if self.awaiting_decision else ("RUNNING" if self.cycle_active else "IDLE")
+                self.cloud_sync.try_send(
+                    self.cloud.post_status,
+                    robot_id=self.cfg.robot_id,
+                    status={
+                        "jetson": "ONLINE",
+                        "mega": "CONNECTED" if self.mega_online else "OFFLINE",
+                        "mqtt": "CONNECTED" if self.mqtt_client is not None else "DISCONNECTED",
+                        "state": state,
+                        "heartbeat": time.strftime("%H:%M:%S") if self.mega_online else None,
+                    },
+                )
 
             if self.awaiting_decision:
                 continue  # 판단 대기 중엔 오프라인 판정 유예
@@ -221,6 +251,18 @@ class RobotAgent:
                 return
         else:
             task = {"id": build_mock_cycle_id()}
+
+        # [Config Sync] 새 Cycle 시작 전에 대시보드가 설정한 운영 정책값을 받아 적용한다.
+        # (Dashboard에서 total_cells/max_view 등 변경 → 다음 Cycle에 반영). 실패해도 무시.
+        if self.cfg.aws_enabled and self.state_db is not None:
+            try:
+                desired = self.cloud.get_robot_config(self.cfg.robot_id)
+                for k, v in (desired or {}).items():
+                    self.state_db.set_config(k, v)
+                if desired:
+                    print(f"[Config] 대시보드 설정 적용: {desired}")
+            except Exception as e:
+                print(f"[Config] desired config 적용 실패(무시): {e}")
 
         self.current_task = task
         self.cycle_active = True
@@ -342,6 +384,17 @@ class RobotAgent:
                 print(f"[SQLite] detection_log 저장 실패(무시): {e}")
         self.arduino.send_json_line({"cmd": CMD_TASK, "task": task})
         print(f"[TASK] cell={cell} {final_status} -> {task} 전송")
+        # 현재 작업(action)을 AWS로 보고 - 대시보드가 OBSERVE/REPLACE/SKIP를 표시한다(실패해도 무시).
+        if self.cfg.aws_enabled and self.current_task is not None:
+            self.cloud_sync.try_send(
+                self.cloud.post_progress,
+                robot_id=self.cfg.robot_id,
+                task_id=self.current_task["id"],
+                target=f"cell_{cell}" if cell is not None else None,
+                state=STATE_VISION_READY,
+                progress=self._cell_progress_percent(cell),
+                action=task,
+            )
         # 다음 셀을 위해 누적 리셋.
         self._inspect_cell = None
         self._inspect_results = []
@@ -360,15 +413,15 @@ class RobotAgent:
 
     def _cell_progress_percent(self, cell) -> int:
         # 현재 Cell 번호 / 전체 Cell 수(system_config.total_cells) 로 진행도(%)를 계산한다.
-        # cell이 없으면(예: RUN 시작) 0. total_cells가 없거나 DB가 없으면 20으로 폴백.
+        # cell이 없으면(예: RUN 시작) 0. total_cells가 없거나 DB가 없으면 5로 폴백.
         if not cell:
             return 0
-        total = 20
+        total = 4
         if self.state_db is not None:
             try:
-                total = self.state_db.get_config_int("total_cells", 20)
+                total = self.state_db.get_config_int("total_cells", 4)
             except Exception:
-                total = 20
+                total = 4
         if total <= 0:
             return 0
         return min(int(round(cell / total * 100)), 100)
@@ -433,6 +486,18 @@ class RobotAgent:
         request_id = req.get("id")
         self.awaiting_decision = True
         print(f"[대기] 병해충 의심({status}) 판단 요청 생성(id={request_id}) - 관리자 응답 대기...")
+        # 대시보드에 "WAIT"(관리자 승인 대기)로 표시되게 보고(실패해도 무시).
+        if self.cfg.aws_enabled and self.current_task is not None:
+            cur_cell = self.current_task.get("cell") if isinstance(self.current_task, dict) else None
+            self.cloud_sync.try_send(
+                self.cloud.post_progress,
+                robot_id=self.cfg.robot_id,
+                task_id=self.current_task["id"],
+                target=f"cell_{cur_cell}" if cur_cell else None,
+                state=STATE_VISION_READY,
+                progress=self._cell_progress_percent(cur_cell) if cur_cell else 0,
+                action="WAIT",
+            )
 
         publisher = None
         get_shared_camera = getattr(self.vision, "get_shared_camera", None)

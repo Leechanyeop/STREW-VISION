@@ -38,13 +38,14 @@ class CloudClient:# AWS 클라우드 API와 통신하는 클라이언트 클래�
     # post_progress 메서드는 아두이노가 스트리밍으로 보내는 진행상황 메시지 하나하나를
     # 그때그때 AWS에 실시간으로 보고합니다. post_response와 달리 한 작업당 여러 번(최대 9회)
     # 호출될 수 있고, 매번 "지금 이 순간의 상태"만 가볍게 담아 보냅니다.
-    def post_progress(self, robot_id: str, task_id: str, target: str, state: str, progress: int) -> Dict[str, Any]:
+    def post_progress(self, robot_id: str, task_id: str, target: str, state: str, progress: int, action: str = None) -> Dict[str, Any]:
         body = {
             "robot_id": robot_id,
             "task_id": task_id,
             "target": target,
             "state": state,
             "progress": progress,
+            "action": action,   # 현재 작업: OBSERVE/REPLACE/SKIP/WAIT (없으면 None)
         }
         r = self.session.post(f"{self.base_url}/robot/progress", json=body, timeout=self.timeout)
         r.raise_for_status()
@@ -105,3 +106,26 @@ class CloudClient:# AWS 클라우드 API와 통신하는 클라이언트 클래�
         r = self.session.post(f"{self.base_url}/robot/ota-status", json=body, timeout=self.timeout)
         r.raise_for_status()
         return r.json()
+
+    def post_robot_config(self, robot_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        # [B] 젯슨 system_config(운영 정책값)을 AWS로 보고 - 대시보드 읽기전용 표시용.
+        body = {"robot_id": robot_id, "config": config}
+        r = self.session.post(f"{self.base_url}/robot/config", json=body, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def post_status(self, robot_id: str, status: Dict[str, Any]) -> Dict[str, Any]:
+        # [Runtime Status] 젯슨/Mega/MQTT 연결 상태 + 하트비트 주기 보고.
+        body = {"robot_id": robot_id, **status}
+        r = self.session.post(f"{self.base_url}/robot/status", json=body, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def get_robot_config(self, robot_id: str) -> Dict[str, Any]:
+        # [Config Sync] 대시보드가 설정한 desired config를 받아온다. 이 robot의 config dict 반환(없으면 {}).
+        r = self.session.get(f"{self.base_url}/robot/config", timeout=self.timeout)
+        r.raise_for_status()
+        for item in r.json().get("items", []):
+            if item.get("robot_id") == robot_id:
+                return item.get("config") or {}
+        return {}

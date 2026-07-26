@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS system_config (
 DEFAULT_CONFIG = {
     "confidence_threshold": "0.8",   # [예약] Early Stop/가변 View 도입 시 사용 (현재 미사용)
     "max_view": "4",                 # 촬영 View 수. Phase C 정책: TOP/LEFT/RIGHT/FRONT 고정 4장
-    "total_cells": "20",             # 한 Cycle의 전체 Cell 수. 진행도(%) 계산 기준(대시보드 조정 가능).
+    "total_cells": "4",              # 한 Cycle의 전체 Cell 수. 진행도(%) 계산 기준(대시보드 조정 가능).
 }
 
 
@@ -179,6 +179,11 @@ class StateDB:
     def get_config(self, key, default=None) -> Optional[str]:
         row = self.conn.execute("SELECT value FROM system_config WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
+
+    def get_all_config(self) -> Dict[str, str]:
+        # system_config 전체를 {key: value} 딕셔너리로. AWS 대시보드 읽기전용 표시용 보고에 쓴다.
+        rows = self.conn.execute("SELECT key, value FROM system_config").fetchall()
+        return {r["key"]: r["value"] for r in rows}
 
     def get_config_float(self, key, default=0.0) -> float:
         v = self.get_config(key)
