@@ -22,7 +22,7 @@ def db():
 
 def test_config_defaults_seeded(db):
     assert db.get_config_float("confidence_threshold") == 0.8
-    assert db.get_config_int("max_view") == 5
+    assert db.get_config_int("max_view") == 4
 
 
 def test_config_set_and_get(db):
@@ -57,20 +57,27 @@ def test_recovery_reads_last_state(db):
 
 
 def test_detection_log(db):
-    db.add_detection("c1", 2, "Disease", 0.96, "TOP")
-    db.add_detection("c1", 2, "Healthy", 0.40, "LEFT")
+    # [B 설계] detection_log = Cell 단위 최종 종합 판정 (status, confidence, task).
+    db.add_detection("c1", 2, "powdery_mildew", 0.96, task="REPLACE")
+    db.add_detection("c1", 3, "healthy", 0.40, task="OBSERVE")
     rows = db.list_detections()
     assert len(rows) == 2
-    assert rows[0]["detection_class"] == "Healthy"   # 최신순
+    assert rows[0]["detection_class"] == "healthy"   # 최신순
+    assert rows[0]["task"] == "OBSERVE"
     assert rows[1]["confidence"] == 0.96
+    assert rows[1]["task"] == "REPLACE"
 
 
-def test_inspection_images_5_views(db):
-    for view in ("TOP", "LEFT", "RIGHT", "LOW", "FRONT"):
-        db.add_image("c1", 5, view, f"/data/img/c1_cell5_{view}.jpg")
+def test_inspection_images_views(db):
+    # [Phase C] View별 원본 (status/confidence 포함).
+    for view in ("TOP", "LEFT", "RIGHT", "FRONT"):
+        db.add_image("c1", 5, view, status="healthy", confidence=0.8,
+                     image_path=None)
     imgs = db.get_images("c1", 5)
-    assert len(imgs) == 5
-    assert [i["view"] for i in imgs] == ["TOP", "LEFT", "RIGHT", "LOW", "FRONT"]
+    assert len(imgs) == 4
+    assert [i["view"] for i in imgs] == ["TOP", "LEFT", "RIGHT", "FRONT"]
+    assert imgs[0]["status"] == "healthy"
+    assert imgs[0]["image_path"] is None   # Phase C: 이미지 파일 없음 (Phase D 예정)
 
 
 def test_task_history_start_finish(db):

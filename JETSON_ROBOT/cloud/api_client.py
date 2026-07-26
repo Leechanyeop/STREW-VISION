@@ -54,8 +54,12 @@ class CloudClient:# AWS 클라우드 API와 통신하는 클라이언트 클래�
     # 요청하는 메서드. cloud_sync.try_send로 감싸지 않고 항상 직접 호출한다 - state_machine
     # 쪽에서 vision_event_id/request_id를 바로 받아서 폴링에 써야 하는데, try_send는
     # 실패시 큐에 넣고 반환값을 버리는 fire-and-forget이라 이 흐름엔 안 맞음.
-    def create_decision_request(self, robot_id: str, vision_event_id: str, detected_status: str) -> Dict[str, Any]:
-        body = {"robot_id": robot_id, "vision_event_id": vision_event_id, "detected_status": detected_status}
+    def create_decision_request(self, robot_id: str, vision_event_id: str, detected_status: str,
+                                inspection_views=None) -> Dict[str, Any]:
+        # [Phase C] inspection_views: 4 View(TOP/LEFT/RIGHT/FRONT) 판독 결과 리스트.
+        # 관리자가 대시보드에서 View별 status/confidence를 보고 승인/거절한다.
+        body = {"robot_id": robot_id, "vision_event_id": vision_event_id, "detected_status": detected_status,
+                "inspection_views": inspection_views or []}
         r = self.session.post(f"{self.base_url}/vision/decision-request", json=body, timeout=self.timeout)
         r.raise_for_status()
         return r.json()

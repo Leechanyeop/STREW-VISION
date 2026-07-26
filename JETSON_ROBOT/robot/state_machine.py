@@ -314,11 +314,19 @@ class RobotAgent:
             except Exception as e:
                 print(f"[!] vision 이벤트 기록 실패(무시하고 진행): {e}")
 
-        # 병해충 의심이면 관리자 승인(4장 이미지 기반), 정상이면 자동 진행.
+        # 병해충 의심이면 관리자 승인(4 View 결과 기반), 정상이면 자동 진행.
+        # [Phase C] 4 View 판독 결과를 판단요청에 함께 실어 관리자가 표로 확인하게 한다.
         if self.cfg.aws_enabled and final_status in DISEASE_SUSPECT_STATUSES:
-            final_status = self._await_admin_decision(final_status, vision_event_id)
+            final_status = self._await_admin_decision(final_status, vision_event_id, self._inspect_results)
 
         task = status_to_task(final_status)
+        # [B 설계] Cell 단위 최종 종합 판정을 detection_log에 1건 기록 (View별 원본은 위에서 저장).
+        if self.state_db is not None:
+            try:
+                self.state_db.add_detection(cycle_id=cycle_id, cell_id=cell,
+                                            detection_class=final_status, confidence=best_conf, task=task)
+            except Exception as e:
+                print(f"[SQLite] detection_log 저장 실패(무시): {e}")
         self.arduino.send_json_line({"cmd": CMD_TASK, "task": task})
         print(f"[TASK] cell={cell} {final_status} -> {task} 전송")
         # 다음 셀을 위해 누적 리셋.
@@ -373,13 +381,15 @@ class RobotAgent:
             )
 
     # 병해충 의심 판독 시 AWS 판단 요청 + 관리자 응답 폴링. treat면 원래 status, ignore면 healthy.
-    def _await_admin_decision(self, status: str, vision_event_id: Optional[str]) -> str:
+    # [Phase C] inspection_views: 4 View 판독 결과. 판단요청에 실어 관리자가 표로 검토.
+    def _await_admin_decision(self, status: str, vision_event_id: Optional[str], inspection_views=None) -> str:
         if vision_event_id is None:
             print(f"[!!!] vision 이벤트 기록 실패로 판단 요청 불가 - 원래 판독값({status})으로 진행")
             return status
 
         try:
-            req = self.cloud.create_decision_request(self.cfg.robot_id, vision_event_id, status)
+            req = self.cloud.create_decision_request(self.cfg.robot_id, vision_event_id, status,
+                                                     inspection_views=inspection_views)
         except Exception as e:
             print(f"[!!!] 판단 요청 생성 실패 - 원래 판독값({status})으로 진행: {e}")
             return status

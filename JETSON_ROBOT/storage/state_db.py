@@ -32,13 +32,14 @@ CREATE TABLE IF NOT EXISTS current_task (
     updated_at   TEXT
 );
 
+-- [B 설계] detection_log = Cell 단위 "최종 종합 판정" 결과 (View별 원본은 inspection_images).
 CREATE TABLE IF NOT EXISTS detection_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_id        TEXT,
     cell_id         INTEGER,
-    detection_class TEXT,                             -- Healthy / Disease
-    confidence      REAL,
-    view            TEXT,
+    detection_class TEXT,                             -- 최종 status (healthy/powdery_mildew/...)
+    confidence      REAL,                             -- 최종 대표 confidence
+    task            TEXT,                             -- 결정된 TASK (OBSERVE/REPLACE/SKIP)
     created_at      TEXT
 );
 
@@ -71,8 +72,8 @@ CREATE TABLE IF NOT EXISTS system_config (
 
 # system_config 기본값 (없으면 채운다).
 DEFAULT_CONFIG = {
-    "confidence_threshold": "0.8",   # 이 값 이상이어야 Disease로 확정
-    "max_view": "5",                 # Observation Planner 최대 View 촬영 횟수
+    "confidence_threshold": "0.8",   # [예약] Early Stop/가변 View 도입 시 사용 (현재 미사용)
+    "max_view": "4",                 # 촬영 View 수. Phase C 정책: TOP/LEFT/RIGHT/FRONT 고정 4장
 }
 
 
@@ -120,12 +121,12 @@ class StateDB:
         self.conn.execute("UPDATE current_task SET status='COMPLETE', updated_at=? WHERE id=1", (_now(),))
         self.conn.commit()
 
-    # ---------- detection_log ----------
-    def add_detection(self, cycle_id, cell_id, detection_class, confidence, view) -> int:
+    # ---------- detection_log (Cell 단위 최종 종합 판정) ----------
+    def add_detection(self, cycle_id, cell_id, detection_class, confidence, task=None) -> int:
         cur = self.conn.execute("""
-            INSERT INTO detection_log(cycle_id, cell_id, detection_class, confidence, view, created_at)
+            INSERT INTO detection_log(cycle_id, cell_id, detection_class, confidence, task, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (cycle_id, cell_id, detection_class, confidence, view, _now()))
+        """, (cycle_id, cell_id, detection_class, confidence, task, _now()))
         self.conn.commit()
         return cur.lastrowid
 
