@@ -334,8 +334,16 @@ class RobotAgent:
         self._inspect_results = []
 
     def _target_view_count(self) -> int:
-        # 촬영할 View 수. config로 재정의 가능하되 기본은 INSPECTION_VIEWS 개수.
-        return int(getattr(self.cfg, "inspection_view_count", len(INSPECTION_VIEWS)))
+        # [B 통일] 촬영할 View 수는 SQLite system_config.max_view에서 읽는다.
+        # 운영 정책값이므로 confidence_threshold와 같은 계층(system_config)에서 관리하며,
+        # Dashboard에서 조정할 수 있다. DB가 없거나 값이 없으면 INSPECTION_VIEWS 개수(4)로 폴백.
+        default = len(INSPECTION_VIEWS)
+        if self.state_db is None:
+            return default
+        try:
+            return self.state_db.get_config_int("max_view", default)
+        except Exception:
+            return default
 
     # COMPLETE: 현재 Cell 작업 완료. AWS로 완료 보고.
     def _on_complete(self, msg: Dict[str, Any]) -> None:

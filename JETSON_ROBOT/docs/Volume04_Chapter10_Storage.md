@@ -68,7 +68,7 @@ StateDB는 5개 테이블을 목적에 따라 3계층으로 나눈다.
 | key | 의미 |
 | --- | --- |
 | confidence_threshold | [예약] Early Stop/가변 View 도입 시 사용 (현재 미사용) |
-| max_view | 촬영 View 수. Phase C 정책상 4 (TOP/LEFT/RIGHT/FRONT) |
+| max_view | 촬영 View 수 (기본 4: TOP/LEFT/RIGHT/FRONT). **런타임에 실제로 이 값을 읽어** View 수를 결정하며, Dashboard에서 조정할 수 있다. |
 
 ### Inspection 데이터 (Phase C)
 
@@ -195,4 +195,15 @@ Storage Module(`storage/state_db.py`)은 Jetson 상태의 Source of Truth인 SQL
 | `detection_log` | 이력 | 1행/셀 | 최종 종합 status/confidence/task |
 | `task_history` | 이력 | — | 작업 실행 이력 (스키마만, 확장 예정) |
 
-호환성: SQLite 3.22 / Python 3.6 (INSERT OR REPLACE, 표준 lib) · 관련 설정: `config.state_db_path`, `inspection_view_count`
+호환성: SQLite 3.22 / Python 3.6 (INSERT OR REPLACE, 표준 lib)
+관련 설정: `config.state_db_path`(DB 파일 경로) · `system_config.max_view`(촬영 View 수)
+
+---
+
+## 부록 2. 운영 정책 관리 원칙 (As-Is / 향후)
+
+> 이후 Chapter 11(Cloud), 12(Updater) 및 AWS 문서도 이 원칙을 공통 전제로 사용한다.
+
+**As-Is (현재 구현).** 운영 정책값(`max_view`, `confidence_threshold`)의 기준은 **Jetson SQLite의 `system_config`**다. Jetson은 런타임에 이 값을 읽어 동작하며(예: `_target_view_count`가 `max_view`를 조회), 로컬에서 값을 바꾸면 즉시 반영된다.
+
+**Implementation Note (향후 확장).** AWS Dashboard에서 변경한 운영 정책을 Jetson SQLite로 전달하는 **Config Sync 경로(Dashboard → Jetson `system_config`)는 현재 구현되어 있지 않으며 향후 확장 예정**이다. 현재 AWS의 설정 저장소와 Jetson SQLite는 분리되어 있어, Dashboard 변경이 Jetson에 자동 반영되지 않는다. Config Sync는 별도 Phase에서 (AWS `system_config` → MQTT/HTTP → Jetson `system_config`) 형태로 추가한다.
