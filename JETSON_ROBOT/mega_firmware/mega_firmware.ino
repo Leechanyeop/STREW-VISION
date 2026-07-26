@@ -12,7 +12,9 @@
     Jetson이 AI 판독 후 TASK(OBSERVE/REPLACE/SKIP)를 내려줘야 물리 동작 시작
   - PING -> 즉시 PONG (하트비트, Jetson이 1초 주기로 확인)
   - Cell 작업 끝나면 COMPLETE, 내부 오류는 ERROR(code)
-  - RESUME(복구)은 이번 범위 미구현 - 다음 단계 예정
+  - [2026-07-25 Phase B] RESUME(복구): EEPROM을 쓰지 않는다. 복구 기준은 Jetson SQLite.
+    부팅 시 READY만 보내고, Jetson이 SQLite를 보고 RUN(새 Cycle, cell 1부터) 또는
+    RESUME(cell 지정, 셀 단위 재개)을 결정해서 내려준다. Mega는 상태를 저장하지 않는다.
 
   ============================================================================
   *** 실제 하드웨어 배선 전 반드시 채워야 할 placeholder (변경 없음) ***
@@ -23,7 +25,7 @@
 */
 
 #include <ArduinoJson.h>
-#include <EEPROM.h>
+// [2026-07-25 Phase B] EEPROM 제거. 복구 상태는 Jetson SQLite가 관리한다(Source of Truth).
 
 #define USE_LCD 1
 #if USE_LCD
@@ -43,9 +45,13 @@ const int PIN_GRIPPER_SERVO = 9;
 // ============================================================================
 // Jetson -> Mega (cmd)
 const char* const CMD_RUN = "RUN";
+const char* const CMD_RESUME = "RESUME";
 const char* const CMD_ACK = "ACK";
 const char* const CMD_TASK = "TASK";
 const char* const CMD_PING = "PING";
+// [Phase C 설계 결정] NEXT_VIEW 없음. Mega가 4 View(TOP/LEFT/RIGHT/FRONT)를 고정 순서로
+// 자체 순회한다. 각 View마다 VISION_READY(view) 전송 후 ACK를 받으면 다음 View로 넘어가고,
+// 마지막 View에서는 ACK와 함께 온 TASK로 이 셀의 물리 동작을 시작한다.
 // Mega -> Jetson (event)
 const char* const EV_READY = "READY";
 const char* const EV_STATE = "STATE";
@@ -57,6 +63,11 @@ const char* const STATE_MOVE_CELL = "MOVE_CELL";
 const char* const STATE_VISION_READY = "VISION_READY";
 const char* const STATE_TASK_DONE = "TASK_DONE";
 
+// [Phase C] Multi-View Inspection: 모든 Cell에서 항상 이 View들을 순서대로 촬영한다.
+// (robot/command.py의 INSPECTION_VIEWS와 일치해야 함.)
+const char* const INSPECTION_VIEWS[] = {"TOP", "LEFT", "RIGHT", "FRONT"};
+const int VIEW_COUNT = 4;
+
 // ============================================================================
 // 상위 동작 모드
 // ============================================================================
@@ -67,8 +78,8 @@ MegaMode megaMode = MODE_IDLE;
 enum CycleStep {
   CS_MOVE_TO_CELL,     // 셀로 이동 후 STATE(MOVE_CELL) 전송
   CS_WAIT_MOVE_ACK,    // MOVE_CELL ACK 대기
-  CS_VISION_READY,     // 카메라 준비 후 STATE(VISION_READY) 전송
-  CS_WAIT_TASK,        // TASK 대기 (AI/관리자 결정)
+  CS_MOVE_TO_VIEW,     // [Phase C] 현재 View 위치로 카메라 이동 후 STATE(VISION_READY, view)
+  CS_WAIT_VIEW_ACK,    // [Phase C] 이 View의 ACK 대기. 마지막 View면 TASK도 함께 기다림.
   CS_EXECUTE_ACTION,   // OBSERVE/REPLACE/SKIP 물리 동작 (내부 진행)
   CS_SEND_DONE,        // STATE(TASK_DONE) 전송
   CS_WAIT_DONE_ACK,    // TASK_DONE ACK 대기
@@ -82,6 +93,9 @@ int currentCell = 1;
 const int TOTAL_CELLS = 4;
 ExecuteTask currentExecuteTask = TASK_SKIP;
 
+// [Phase C] 현재 셀에서 몇 번째 View를 촬영 중인지 (0-based).
+int currentViewIndex = 0;
+
 // ---- STATE/ACK 핸드셰이크 ----
 long seqCounter = 0;      // STATE마다 증가
 long pendingSeq = -1;     // 지금 ACK를 기다리는 seq (-1이면 대기 안 함)
@@ -91,13 +105,16 @@ bool taskReceived = false;
 const unsigned long ACTION_TOTAL_MS = 2500;  // TODO: 실제 동작 시간
 unsigned long actionStartMs = 0;
 
-// ---- EEPROM: 다음 시작 셀 (복구용 잔존 - RESUME 미구현이라 지금은 참고 정보) ----
-const int EEPROM_ADDR_NEXT_CELL = 0;
-uint8_t loadNextCellFromEeprom() {
-  uint8_t v = EEPROM.read(EEPROM_ADDR_NEXT_CELL);
-  return (v < 1 || v > TOTAL_CELLS) ? 1 : v;
+// [2026-07-25 Phase B] 지정한 셀부터 순회를 시작한다(RUN=1부터, RESUME=cell부터).
+// 셀 단위 재개: 셀 중간 스텝은 복원하지 않고 그 셀을 처음(MOVE_CELL)부터 다시 한다.
+// (위치/암커더 센서가 없어 셀 중간 물리 위치 복원이 불가하므로 셀 처음부터가 안전.)
+void startCycleFromCell(int cell) {
+  currentCell = (cell < 1 || cell > TOTAL_CELLS) ? 1 : cell;
+  megaMode = MODE_RUN;
+  cycleStep = CS_MOVE_TO_CELL;
+  pendingSeq = -1;
+  taskReceived = false;
 }
-void saveNextCellToEeprom(uint8_t nextCell) { EEPROM.update(EEPROM_ADDR_NEXT_CELL, nextCell); }
 
 // ============================================================================
 // 시리얼 한 줄 읽기 (non-blocking)
@@ -150,6 +167,19 @@ long sendState(int cell, const char* state) {
   return seq;
 }
 
+// [Phase C] View 정보를 포함한 STATE 전송 (VISION_READY 전용).
+long sendStateWithView(int cell, const char* state, const char* view) {
+  long seq = ++seqCounter;
+  StaticJsonDocument<160> d;
+  d["event"] = EV_STATE;
+  d["seq"] = seq;
+  d["cell"] = cell;
+  d["state"] = state;
+  d["view"] = view;
+  sendDoc(d);
+  return seq;
+}
+
 #if USE_LCD
 void showMessage(const char* l1, const char* l2) {
   lcd.clear(); lcd.setCursor(0, 0); lcd.print(l1); lcd.setCursor(0, 1); lcd.print(l2);
@@ -162,6 +192,8 @@ void showMessage(const char* l1, const char* l2) {
 void moveToCell(int cellIndex) { /* TODO */ }
 void returnToHome() { /* TODO */ }
 void positionCamera() { /* TODO */ }
+// [Phase C] 카메라를 특정 View 자세로 이동 (TOP/LEFT/RIGHT/FRONT). 실제 서보/스텝 제어는 TODO.
+void moveToView(const char* view) { /* TODO: view별 카메라 자세 이동 */ }
 void executePhysicalTask(ExecuteTask t) { /* TODO: OBSERVE/REPLACE/SKIP별 실제 동작 */ }
 bool checkForHardwareFault() { return false; }
 
@@ -190,23 +222,37 @@ void runCycleStep() {
 
     case CS_WAIT_MOVE_ACK:
       // ACK 도착은 handleIncomingLine에서 pendingSeq를 -1로 풀어준다.
-      if (pendingSeq == -1) cycleStep = CS_VISION_READY;
+      if (pendingSeq == -1) {
+        currentViewIndex = 0;   // [Phase C] 첫 View부터 시작
+        cycleStep = CS_MOVE_TO_VIEW;
+      }
       break;
 
-    case CS_VISION_READY:
+    case CS_MOVE_TO_VIEW: {
+      // [Phase C] 현재 View 자세로 이동 후 VISION_READY(view) 전송.
+      const char* view = INSPECTION_VIEWS[currentViewIndex];
+      moveToView(view);
       positionCamera();
-      // VISION_READY는 ACK가 아니라 TASK를 기다린다(AI 동기화 지점).
       taskReceived = false;
-      pendingSeq = sendState(currentCell, STATE_VISION_READY);
-      cycleStep = CS_WAIT_TASK;
+      pendingSeq = sendStateWithView(currentCell, STATE_VISION_READY, view);
+      cycleStep = CS_WAIT_VIEW_ACK;
       break;
+    }
 
-    case CS_WAIT_TASK:
-      // Jetson은 VISION_READY에 ACK도 보내고(pendingSeq 풀림) TASK도 보낸다.
-      // 우리는 TASK가 올 때까지 기다린다.
-      if (taskReceived) {
-        actionStartMs = millis();
-        cycleStep = CS_EXECUTE_ACTION;
+    case CS_WAIT_VIEW_ACK:
+      // ACK를 받으면 다음 View로 넘어간다. 마지막 View(FRONT)에서는 Jetson이 ACK와 함께
+      // TASK도 보내므로, ACK로 View는 끝내되 TASK가 왔으면 물리 동작으로 진입한다.
+      if (pendingSeq == -1) {
+        if (currentViewIndex < VIEW_COUNT - 1) {
+          // 아직 View 남음 -> 다음 View로.
+          currentViewIndex++;
+          cycleStep = CS_MOVE_TO_VIEW;
+        } else if (taskReceived) {
+          // 마지막 View + TASK 도착 -> 물리 동작.
+          actionStartMs = millis();
+          cycleStep = CS_EXECUTE_ACTION;
+        }
+        // 마지막 View인데 TASK가 아직이면 여기서 계속 대기(pendingSeq는 이미 -1).
       }
       break;
 
@@ -226,15 +272,14 @@ void runCycleStep() {
 
     case CS_ADVANCE:
       sendComplete();  // 이 셀 완료 통보 (COMPLETE는 ACK 불필요)
+      // [2026-07-25 Phase B] EEPROM 저장 제거. 진행 상태는 Jetson SQLite가 관리한다.
       if (currentCell >= TOTAL_CELLS) {
         returnToHome();
-        saveNextCellToEeprom(1);
         megaMode = MODE_IDLE;
         currentCell = 1;
         cycleStep = CS_MOVE_TO_CELL;
       } else {
         currentCell++;
-        saveNextCellToEeprom((uint8_t)currentCell);
         cycleStep = CS_MOVE_TO_CELL;
       }
       break;
@@ -258,12 +303,17 @@ void handleIncomingLine(const String& line) {
   }
 
   if (strcmp(cmd, CMD_RUN) == 0) {
+    // 새 Cycle: 항상 Cell 1부터. cycle_id는 Jetson이 관리하므로 Mega는 저장 안 함.
+    if (megaMode == MODE_IDLE) startCycleFromCell(1);
+    return;
+  }
+
+  if (strcmp(cmd, CMD_RESUME) == 0) {
+    // [2026-07-25 Phase B] 복구 재개: Jetson이 SQLite에서 읽은 cell부터 셀 단위로 재개.
+    // 셀 중간 스텝(state)은 복원하지 않는다 - 그 셀을 처음부터 다시 한다(안전).
     if (megaMode == MODE_IDLE) {
-      megaMode = MODE_RUN;
-      // cycle_id는 Jetson이 관리(AWS task id). Mega는 참고만 하고 별도 저장 안 함.
-      cycleStep = CS_MOVE_TO_CELL;
-      pendingSeq = -1;
-      taskReceived = false;
+      int cell = doc["cell"] | 1;
+      startCycleFromCell(cell);
     }
     return;
   }
@@ -275,14 +325,14 @@ void handleIncomingLine(const String& line) {
   }
 
   if (strcmp(cmd, CMD_TASK) == 0) {
-    if (megaMode == MODE_RUN && cycleStep == CS_WAIT_TASK) {
+    // [Phase C] 마지막 View 판정 완료 - 이 셀의 물리 동작을 시작하라는 최종 결정.
+    if (megaMode == MODE_RUN && cycleStep == CS_WAIT_VIEW_ACK) {
       const char* taskStr = doc["task"] | "SKIP";
       currentExecuteTask = parseTask(taskStr);
       taskReceived = true;
     }
     return;
   }
-  // RESUME은 미구현 - 무시.
 }
 
 // ============================================================================
@@ -295,11 +345,13 @@ void setup() {
 #if USE_LCD
   lcd.init(); lcd.backlight(); showMessage("STREW ROBOT", "READY");
 #endif
+  // [2026-07-25 Phase B] 부팅 시 상태를 스스로 복원하지 않는다(EEPROM 없음).
+  // 항상 IDLE + Cell 1로 시작하고, 실제 시작 셀은 Jetson의 RUN/RESUME이 결정한다.
   megaMode = MODE_IDLE;
-  currentCell = loadNextCellFromEeprom();
+  currentCell = 1;
   cycleStep = CS_MOVE_TO_CELL;
 
-  // 부팅 완료 알림 - Jetson은 이걸 받고 RUN을 보낸다.
+  // 부팅 완료 알림 - Jetson은 이걸 받고 RUN(새 Cycle) 또는 RESUME(복구)을 보낸다.
   delay(200);
   sendReady();
 }

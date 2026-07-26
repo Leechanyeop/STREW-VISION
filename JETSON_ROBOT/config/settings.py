@@ -107,6 +107,10 @@ class Config: #모든 설정값을 담는 Config 클래스입니다.
     # [2026-07-25 v2.0] Jetson 상태 관리 SQLite (Source of Truth). Recovery 기준 DB.
     state_db_path: str = os.getenv("STATE_DB_PATH", "data/robot_state.db")
 
+    # [2026-07-25 Phase C] Multi-View Inspection: 모든 Cell에서 촬영하는 View 수.
+    # 기본 4개(TOP/LEFT/RIGHT/FRONT). 실제 View 이름은 robot/command.py INSPECTION_VIEWS.
+    inspection_view_count: int = int(os.getenv("INSPECTION_VIEW_COUNT", "4"))
+
     arduino_port: str = os.getenv("ARDUINO_PORT", "/dev/ttyACM0")
     arduino_baudrate: int = int(os.getenv("ARDUINO_BAUDRATE", "115200"))
     poll_interval_sec: float = float(os.getenv("POLL_INTERVAL_SEC", "1.0"))

@@ -10,6 +10,7 @@ from cloud.sensor_bridge import SensorBridge
 from config.settings import Config
 from robot.command import (
     CMD_RUN,
+    CMD_RESUME,
     CMD_ACK,
     CMD_TASK,
     CMD_PING,
@@ -19,7 +20,10 @@ from robot.command import (
     EV_ERROR,
     EV_PONG,
     STATE_VISION_READY,
+    INSPECTION_VIEWS,
+    DISEASE_STATUSES,
     status_to_task,
+    aggregate_views,
 )
 from robot.uart import ArduinoLink
 
@@ -30,7 +34,7 @@ HEARTBEAT_INTERVAL_SEC = 1.0
 HEARTBEAT_TIMEOUT_SEC = 3.0
 
 # 병해충 의심 판독. 즉시 TASK를 내리지 않고 AWS에 판단 요청 후 관리자 응답을 기다린다.
-DISEASE_SUSPECT_STATUSES = {"powdery_mildew"}
+DISEASE_SUSPECT_STATUSES = set(DISEASE_STATUSES)
 
 # 관리자 판단 대기 중 폴링 간격(초).
 DECISION_POLL_INTERVAL_SEC = 5.0
@@ -95,6 +99,11 @@ class RobotAgent:
         # 현재 진행 중인 Cycle의 AWS task (COMPLETE/ERROR를 이 task_id로 릴레이).
         self.current_task: Optional[Dict[str, Any]] = None
         self.cycle_active: bool = False
+
+        # [Phase C] Multi-View Inspection: 현재 셀에서 지금까지 촬영한 View 판독 결과 누적.
+        # 셀이 바뀌면(첫 VISION_READY가 TOP이면) 초기화한다.
+        self._inspect_cell: Optional[int] = None
+        self._inspect_results: list = []
 
         # 관리자 판단 대기 중 여부. 이 동안은 하트비트 오프라인 판정을 유예한다 -
         # 리스너 스레드가 판단 폴링으로 블로킹돼서 PONG을 못 읽는 것뿐이지 Mega가 죽은
@@ -168,10 +177,31 @@ class RobotAgent:
                 self._on_error(msg)
             # 알 수 없는 event는 무시.
 
-    # READY: Mega 부팅/리셋 완료. task를 확보해 RUN을 내린다.
+    # READY: Mega 부팅/리셋 완료.
+    # [2026-07-25 Phase B] 먼저 SQLite에 미완료 작업(status=RUNNING)이 남아있는지 확인한다.
+    # 있으면 전원/네트워크가 끊겼다 복구된 상황이므로 RESUME(셀 단위 재개)을 보내고,
+    # 없으면 기존대로 새 작업을 확보해 RUN을 보낸다. Recovery의 기준은 EEPROM이 아니라
+    # Jetson SQLite(Source of Truth)다.
     def _on_ready(self) -> None:
         self.last_pong_time = time.monotonic()  # READY도 살아있음의 신호
         print("[READY] Mega 부팅 완료 - Cycle 준비")
+
+        recovery = self._check_recovery()
+        if recovery is not None:
+            cycle_id = recovery.get("cycle_id")
+            cell = recovery.get("cell_id")
+            task = recovery.get("task")
+            state = recovery.get("state")
+            # 복구 대상 cycle을 현재 작업으로 복원(이후 STATE/COMPLETE를 이 id로 릴레이).
+            self.current_task = {"id": cycle_id} if cycle_id else None
+            self.cycle_active = True
+            self.arduino.send_json_line({
+                "cmd": CMD_RESUME, "cycle_id": cycle_id, "cell": cell, "task": task, "state": state,
+            })
+            print(f"[RESUME] cycle={cycle_id} cell={cell}부터 셀 단위 재개")
+            return
+
+        # 신규 Cycle
         if self.cfg.aws_enabled:
             task = self.cloud.next_task(self.cfg.robot_id)
             if not task:
@@ -187,6 +217,21 @@ class RobotAgent:
         self._db_update(cycle_id=cycle_id, cell_id=None, state="RUN", status="RUNNING")
         self.arduino.send_json_line({"cmd": CMD_RUN, "cycle_id": cycle_id})
         print(f"[RUN] cycle_id={cycle_id} 전송")
+
+    # SQLite에 미완료 작업이 남아있는지 확인. 있으면 그 레코드(dict)를, 없으면 None.
+    # 판정: status가 RUNNING이고 실제 진행된 셀(cell_id)이 있어야 재개 의미가 있다.
+    # (RUN만 기록되고 STATE 전이면 cell_id=None -> 그냥 새 RUN이 낫다.)
+    def _check_recovery(self) -> Optional[Dict[str, Any]]:
+        if self.state_db is None:
+            return None
+        try:
+            cur = self.state_db.get_current_task()
+        except Exception as e:
+            print(f"[Recovery] SQLite 조회 실패(무시, 새 RUN으로): {e}")
+            return None
+        if cur and cur.get("status") == "RUNNING" and cur.get("cell_id") is not None:
+            return cur
+        return None
 
     # STATE: 상태 완료 보고. DB 저장(릴레이) 후 ACK. VISION_READY면 AI 수행 후 TASK.
     def _on_state(self, msg: Dict[str, Any]) -> None:
@@ -214,29 +259,75 @@ class RobotAgent:
         self.arduino.send_json_line({"cmd": CMD_ACK, "seq": seq})
 
         # VISION_READY는 "완료 보고"가 아니라 "AI 요청 동기화 지점".
-        # AI 판독 -> (병해충 의심이면 관리자 판단) -> TASK를 내려줘야 Mega가 물리 동작 시작.
+        # [Phase C ②] Multi-View: view별로 AI 추론·누적. View 진행은 위에서 이미 보낸 ACK로
+        # Mega가 자체 순회하며, 4개 다 찍히면(마지막 View) 종합 판정 -> TASK를 추가로 보낸다.
         if state == STATE_VISION_READY:
-            self._handle_vision_ready()
+            self._handle_vision_ready(cell, msg.get("view"))
 
-    def _handle_vision_ready(self) -> None:
+    # [Phase C] Multi-View Inspection의 Decision Planner (Jetson 측).
+    # Mega가 View 하나에서 VISION_READY(view=...)를 보낼 때마다 호출된다.
+    # 설계 결정(②): NEXT_VIEW 없이 STATE->ACK 핸드셰이크만으로 View가 넘어간다.
+    #   - ACK는 _on_state에서 이미 보냈으므로 Mega는 자동으로 다음 View로 이동한다.
+    #   - 이 함수는 View 판독을 누적만 하고, 마지막(4번째) View 후에만 TASK를 추가로 보낸다.
+    def _handle_vision_ready(self, cell, view) -> None:
+        cycle_id = self.current_task["id"] if self.current_task else None
+
+        # 셀이 바뀌면 누적 초기화 (새 셀의 첫 View).
+        if self._inspect_cell != cell:
+            self._inspect_cell = cell
+            self._inspect_results = []
+
         vision = self.vision.read().to_payload()
         status = vision.get("status")
+        confidence = vision.get("confidence")
 
+        # 이 View 결과를 SQLite에 저장(관리자가 나중에 View별로 확인).
+        if self.state_db is not None:
+            try:
+                self.state_db.add_image(cycle_id=cycle_id, cell_id=cell, view=view,
+                                        status=status, confidence=confidence, image_path=None)
+            except Exception as e:
+                print(f"[SQLite] inspection_image 저장 실패(무시): {e}")
+
+        self._inspect_results.append({"view": view, "status": status, "confidence": confidence})
+        done_views = len(self._inspect_results)
+        target_views = self._target_view_count()
+        print(f"[VIEW] cell={cell} view={view} status={status} conf={confidence} ({done_views}/{target_views})")
+
+        # 아직 View가 남았으면 아무것도 안 한다 - ACK(이미 보냄)로 Mega가 다음 View를 진행한다.
+        if done_views < target_views:
+            return
+
+        # 모든 View(4장) 촬영 완료 -> 종합 판정.
+        final_status, best_conf = aggregate_views(self._inspect_results)
+        print(f"[INSPECT] cell={cell} 종합판정: {final_status} (conf={best_conf})")
+
+        # 종합 결과를 AWS에 하나의 vision 이벤트로 기록(판단요청용 id 확보).
         vision_event_id = None
         if self.cfg.aws_enabled:
             try:
-                event = self.cloud.post_vision_event(self.cfg.robot_id, vision)
+                event = self.cloud.post_vision_event(self.cfg.robot_id, {
+                    "status": final_status, "confidence": best_conf,
+                    "views": self._inspect_results, "cell_id": cell,
+                })
                 vision_event_id = event.get("id")
             except Exception as e:
                 print(f"[!] vision 이벤트 기록 실패(무시하고 진행): {e}")
 
-        # 병해충 의심이면 관리자 판단을 기다린다(정상 판독은 그대로 자동 진행).
-        if self.cfg.aws_enabled and status in DISEASE_SUSPECT_STATUSES:
-            status = self._await_admin_decision(status, vision_event_id)
+        # 병해충 의심이면 관리자 승인(4장 이미지 기반), 정상이면 자동 진행.
+        if self.cfg.aws_enabled and final_status in DISEASE_SUSPECT_STATUSES:
+            final_status = self._await_admin_decision(final_status, vision_event_id)
 
-        task = status_to_task(status)
+        task = status_to_task(final_status)
         self.arduino.send_json_line({"cmd": CMD_TASK, "task": task})
-        print(f"[TASK] vision={status} -> {task} 전송")
+        print(f"[TASK] cell={cell} {final_status} -> {task} 전송")
+        # 다음 셀을 위해 누적 리셋.
+        self._inspect_cell = None
+        self._inspect_results = []
+
+    def _target_view_count(self) -> int:
+        # 촬영할 View 수. config로 재정의 가능하되 기본은 INSPECTION_VIEWS 개수.
+        return int(getattr(self.cfg, "inspection_view_count", len(INSPECTION_VIEWS)))
 
     # COMPLETE: 현재 Cell 작업 완료. AWS로 완료 보고.
     def _on_complete(self, msg: Dict[str, Any]) -> None:

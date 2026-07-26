@@ -23,8 +23,10 @@ CREATE TABLE IF NOT EXISTS current_task (
     id           INTEGER PRIMARY KEY CHECK (id = 1),  -- 항상 1행만
     cycle_id     TEXT,
     cell_id      INTEGER,
-    state        TEXT,
     task         TEXT,
+    state        TEXT,
+    step         TEXT,                                -- Replace Step ID (Volume 03) - 진행률 계산용
+    progress     INTEGER,                             -- 0~100
     view         TEXT,
     status       TEXT,                                -- RUNNING / COMPLETE
     updated_at   TEXT
@@ -44,7 +46,9 @@ CREATE TABLE IF NOT EXISTS inspection_images (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_id    TEXT,
     cell_id     INTEGER,
-    view        TEXT,                                 -- TOP/LEFT/RIGHT/LOW/FRONT
+    view        TEXT,                                 -- TOP/LEFT/RIGHT/FRONT
+    status      TEXT,                                 -- 해당 View의 판독 status
+    confidence  REAL,                                 -- 해당 View의 confidence
     image_path  TEXT,
     created_at  TEXT
 );
@@ -96,16 +100,16 @@ class StateDB:
 
     # ---------- current_task (Recovery 기준) ----------
     def update_current_task(self, cycle_id=None, cell_id=None, state=None, task=None,
-                            view=None, status="RUNNING") -> None:
+                            step=None, progress=None, view=None, status="RUNNING") -> None:
         """현재 작업 상태를 갱신(항상 id=1 행 하나만 유지). STATE 받을 때마다 호출.
 
         INSERT OR REPLACE를 쓴다(모든 컬럼을 매번 넘기므로 안전). ON CONFLICT DO UPDATE는
         SQLite 3.24+ 전용인데 젯슨 나노(Ubuntu 18.04)는 3.22라 못 쓴다.
         """
         self.conn.execute("""
-            INSERT OR REPLACE INTO current_task(id, cycle_id, cell_id, state, task, view, status, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-        """, (cycle_id, cell_id, state, task, view, status, _now()))
+            INSERT OR REPLACE INTO current_task(id, cycle_id, cell_id, task, state, step, progress, view, status, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (cycle_id, cell_id, task, state, step, progress, view, status, _now()))
         self.conn.commit()
 
     def get_current_task(self) -> Optional[Dict[str, Any]]:
@@ -131,12 +135,12 @@ class StateDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # ---------- inspection_images (사진 5장) ----------
-    def add_image(self, cycle_id, cell_id, view, image_path) -> int:
+    # ---------- inspection_images (View별 사진 + 판독) ----------
+    def add_image(self, cycle_id, cell_id, view, status=None, confidence=None, image_path=None) -> int:
         cur = self.conn.execute("""
-            INSERT INTO inspection_images(cycle_id, cell_id, view, image_path, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (cycle_id, cell_id, view, image_path, _now()))
+            INSERT INTO inspection_images(cycle_id, cell_id, view, status, confidence, image_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (cycle_id, cell_id, view, status, confidence, image_path, _now()))
         self.conn.commit()
         return cur.lastrowid
 

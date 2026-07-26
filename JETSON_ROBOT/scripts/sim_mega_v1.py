@@ -30,7 +30,11 @@ class FakeMega:
         self.seq = 0
         self.pending_seq = None
         self.task = None
+        self.next_view = False           # [Phase C] NEXT_VIEW 수신
+        self.view_i = 0                  # [Phase C] 현재 View 인덱스
         self._boot_sent = False
+
+    VIEWS = ("TOP", "LEFT", "RIGHT", "FRONT")   # [Phase C]
 
     # ---- Jetson이 쓰는 쪽 (ArduinoLink.send_json_line이 호출) ----
     def write_cmd(self, payload: dict):
@@ -46,7 +50,7 @@ class FakeMega:
             if payload.get("seq") == self.pending_seq:
                 self.pending_seq = None
         elif cmd == "TASK":
-            if self.step == "WAIT_TASK":
+            if self.step == "WAIT_VIEW_ACK":
                 self.task = payload.get("task")
 
     # ---- Jetson이 읽는 쪽 (ArduinoLink._read_json_line이 호출) ----
@@ -67,19 +71,33 @@ class FakeMega:
         self._emit({"event": "STATE", "seq": self.seq, "cell": self.cell, "state": state})
         return self.seq
 
+    def _send_state_view(self, state, view):
+        self.seq += 1
+        self.pending_seq = self.seq
+        self._emit({"event": "STATE", "seq": self.seq, "cell": self.cell, "state": state, "view": view})
+
     def _tick(self):
         if self.mode != "RUN":
             return
         if self.step == "MOVE":
             self._send_state("MOVE_CELL"); self.step = "WAIT_MOVE_ACK"
         elif self.step == "WAIT_MOVE_ACK":
-            if self.pending_seq is None: self.step = "VISION"
-        elif self.step == "VISION":
-            self._send_state("VISION_READY"); self.task = None; self.step = "WAIT_TASK"
-        elif self.step == "WAIT_TASK":
-            if self.task is not None:
-                print(f"  (Mega) TASK={self.task} 수신 -> 물리 동작(가상)")
-                self.step = "DONE"
+            if self.pending_seq is None:
+                self.view_i = 0; self.step = "MOVE_VIEW"   # [Phase C] 첫 View부터
+        elif self.step == "MOVE_VIEW":
+            # [Phase C ②] 현재 View 자세로 이동 후 VISION_READY(view) 전송
+            self._send_state_view("VISION_READY", self.VIEWS[self.view_i])
+            self.task = None
+            self.step = "WAIT_VIEW_ACK"
+        elif self.step == "WAIT_VIEW_ACK":
+            # ACK를 받으면(pending_seq None) 다음 View로. 마지막 View면 TASK를 기다려 물리 동작.
+            if self.pending_seq is None:
+                if self.view_i < len(self.VIEWS) - 1:
+                    self.view_i += 1
+                    self.step = "MOVE_VIEW"
+                elif self.task is not None:
+                    print(f"  (Mega) TASK={self.task} 수신 (View 4장) -> 물리 동작(가상)")
+                    self.step = "DONE"
         elif self.step == "DONE":
             self._send_state("TASK_DONE"); self.step = "WAIT_DONE_ACK"
         elif self.step == "WAIT_DONE_ACK":
