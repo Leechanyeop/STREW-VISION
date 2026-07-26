@@ -314,9 +314,7 @@ void startCycle()
 // JSON Command 처리
 // ================================
 
-void processCommand(
-    JsonDocument& doc
-)
+void processCommand(JsonDocument& doc)
 {
 
     const char* command =
@@ -353,7 +351,24 @@ void processCommand(
         handleVisionResult(doc);
     }
 
+    // PING
+    else if(
+        strcmp(command,"PING")==0
+    )
+    {
+        StaticJsonDocument<128> response;
 
+        response["status"] = "PONG";
+        response["command"] = "PING";
+
+        sendJson(response);
+
+
+        showMessage(
+            "PING",
+            "PONG"
+        );
+    }
 
     // STOP
 
