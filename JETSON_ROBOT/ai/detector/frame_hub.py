@@ -71,8 +71,10 @@ class SharedFrameCamera:
         Gst = self.Gst
         np = self.np
         while self._running:
-            # 0.5초 타임아웃으로 폴링 - 프레임 없으면 None 반환하고 루프 계속(_running 확인 가능).
-            sample = self._sink.try_pull_sample(Gst.SECOND // 2)
+            # 젯슨 GStreamer 1.14의 gi 바인딩에는 appsink.try_pull_sample() 메서드가 없어서
+            # (GstApp gir 미로드), action 시그널 "try-pull-sample"을 emit으로 호출한다.
+            # 인자: timeout(ns). 반환: GstSample 또는 None(타임아웃). 0.5초 폴링.
+            sample = self._sink.emit("try-pull-sample", Gst.SECOND // 2)
             if sample is None:
                 continue
             buf = sample.get_buffer()
