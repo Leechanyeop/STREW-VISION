@@ -36,6 +36,13 @@ class SharedFrameCamera:
         import gi
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
+        # [중요] GstApp gir를 로드해야 appsink에 try_pull_sample()/pull_sample() '메서드'가 붙는다.
+        # (안 불러오면 appsink가 일반 GstElement로만 보여 try_pull_sample 메서드가 없다.)
+        try:
+            gi.require_version("GstApp", "1.0")
+            from gi.repository import GstApp  # noqa: F401 (import 자체로 메서드 바인딩)
+        except Exception:
+            pass
 
         self.np = np
         self.Gst = Gst
@@ -70,13 +77,29 @@ class SharedFrameCamera:
     def _capture_loop(self) -> None:
         Gst = self.Gst
         np = self.np
+        bus = self._pipeline.get_bus()
+        first = True
         while self._running:
-            # 젯슨 GStreamer 1.14의 gi 바인딩에는 appsink.try_pull_sample() 메서드가 없어서
-            # (GstApp gir 미로드), action 시그널 "try-pull-sample"을 emit으로 호출한다.
-            # 인자: timeout(ns). 반환: GstSample 또는 None(타임아웃). 0.5초 폴링.
-            sample = self._sink.emit("try-pull-sample", Gst.SECOND // 2)
+            # 파이프라인 하류 에러(caps 협상 실패 등) 있으면 찍는다 - 프레임 안 오는 원인 진단용.
+            msg = bus.pop_filtered(Gst.MessageType.ERROR)
+            if msg is not None:
+                err, dbg = msg.parse_error()
+                print("[frame_hub] GStreamer 에러:", err, "|", dbg)
+
+            # sample pull: GstApp 로드됐으면 try_pull_sample() 메서드, 아니면 action 시그널 emit.
+            # 둘 다 timeout(ns) 후 None(타임아웃) 반환. 0.5초 폴링.
+            try:
+                if hasattr(self._sink, "try_pull_sample"):
+                    sample = self._sink.try_pull_sample(Gst.SECOND // 2)
+                else:
+                    sample = self._sink.emit("try-pull-sample", Gst.SECOND // 2)
+            except Exception as e:
+                print("[frame_hub] pull 예외:", e)
+                time.sleep(0.1)
+                continue
             if sample is None:
                 continue
+
             buf = sample.get_buffer()
             st = sample.get_caps().get_structure(0)
             w = st.get_value("width")
@@ -92,6 +115,10 @@ class SharedFrameCamera:
                 frame = frame[:w * h * 3].reshape(h, w, 3).copy()
             finally:
                 buf.unmap(info)
+
+            if first:
+                print("[frame_hub] 첫 프레임 수신 OK:", frame.shape)
+                first = False
             with self._lock:
                 self._latest_frame = frame
                 self._latest_frame_time = time.monotonic()
