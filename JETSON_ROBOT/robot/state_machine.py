@@ -111,6 +111,7 @@ class RobotAgent:
         # 현재 진행 중인 Cycle의 AWS task (COMPLETE/ERROR를 이 task_id로 릴레이).
         self.current_task: Optional[Dict[str, Any]] = None
         self.cycle_active: bool = False
+        self._cycles_done: int = 0   # 완료한 사이클 수(부팅 이후). cycle_count 목표 도달 판단용.
 
         # [Phase C] Multi-View Inspection: 현재 셀에서 지금까지 촬영한 View 판독 결과 누적.
         # 셀이 바뀌면(첫 VISION_READY가 TOP이면) 초기화한다.
@@ -239,12 +240,7 @@ class RobotAgent:
             print(f"[RESUME] cycle={cycle_id} cell={cell}부터 셀 단위 재개")
             return
 
-        # [Scheduler] 스케줄이 활성화돼 있으면 부팅 시 자동 순회하지 않고, 스케줄 시각을
-        # 기다린다(스케줄러 스레드가 예약 시각에 순회를 시작한다). 스케줄이 없으면 기존대로 즉시 순회.
-        if self._schedule_active():
-            print("[READY] 스케줄 모드 - 예약 시각까지 순회 대기")
-            return
-
+        # [연속 순회] 부팅하면 바로 첫 사이클 시작. 이후엔 사이클이 끝날 때마다 자동 재시작한다.
         self._begin_new_cycle()
 
     def _begin_new_cycle(self) -> bool:
@@ -424,7 +420,7 @@ class RobotAgent:
         # 병해충 의심이면 관리자 승인(4 View 결과 기반), 정상이면 자동 진행.
         # [Phase C] 4 View 판독 결과를 판단요청에 함께 실어 관리자가 표로 확인하게 한다.
         if self.cfg.aws_enabled and final_status in DISEASE_SUSPECT_STATUSES:
-            final_status = self._await_admin_decision(final_status, vision_event_id, self._inspect_results)
+            final_status = self._await_admin_decision(final_status, vision_event_id, self._inspect_results, cell=cell)
 
         task = status_to_task(final_status)
         # [B 설계] Cell 단위 최종 종합 판정을 detection_log에 1건 기록 (View별 원본은 위에서 저장).
@@ -484,12 +480,20 @@ class RobotAgent:
         cell = msg.get("cell")
         cycle_id = self.current_task["id"] if self.current_task else None
         self._db_update(cycle_id=cycle_id, cell_id=cell, state="COMPLETE", status="COMPLETE")
-        # 마지막 셀 완료면 Cycle 종료 → Mega가 IDLE로 돌아가므로 cycle_active를 내린다.
-        # (스케줄러가 다음 예약 시각에 순회를 재시작할 수 있게 한다.)
+        # 마지막 셀 완료면 Cycle 종료 → Mega가 returnToHome 후 IDLE로 복귀한다.
+        # [연속 순회] Mega가 IDLE로 돌아올 시간(returnToHome)을 준 뒤 다음 사이클을 자동 시작한다.
+        # 리스너 스레드를 막지 않도록 Timer로 지연 실행(그 사이 PONG 수신 계속).
         total = self.state_db.get_config_int("total_cells", 4) if self.state_db is not None else 4
         if cell is not None and cell >= total:
             self.cycle_active = False
-            print(f"[CYCLE] 마지막 셀({cell}/{total}) 완료 - Cycle 종료, Mega IDLE")
+            self._cycles_done += 1
+            target = self.state_db.get_config_int("cycle_count", 0) if self.state_db is not None else 0
+            if target > 0 and self._cycles_done >= target:
+                print(f"[CYCLE] 목표 사이클 {target}회 완료({self._cycles_done}) - 순회 종료")
+            else:
+                extra = f" (목표 {target}회 중)" if target > 0 else " (무한 반복)"
+                print(f"[CYCLE] {self._cycles_done}회 완료{extra} - 3초 후 다음 사이클")
+                threading.Timer(3.0, self._begin_new_cycle).start()
         if self.cfg.aws_enabled and self.current_task is not None:
             self.cloud_sync.try_send(
                 self.cloud.post_response,
@@ -529,14 +533,14 @@ class RobotAgent:
 
     # 병해충 의심 판독 시 AWS 판단 요청 + 관리자 응답 폴링. treat면 원래 status, ignore면 healthy.
     # [Phase C] inspection_views: 4 View 판독 결과. 판단요청에 실어 관리자가 표로 검토.
-    def _await_admin_decision(self, status: str, vision_event_id: Optional[str], inspection_views=None) -> str:
+    def _await_admin_decision(self, status: str, vision_event_id: Optional[str], inspection_views=None, cell=None) -> str:
         if vision_event_id is None:
             print(f"[!!!] vision 이벤트 기록 실패로 판단 요청 불가 - 원래 판독값({status})으로 진행")
             return status
 
         try:
             req = self.cloud.create_decision_request(self.cfg.robot_id, vision_event_id, status,
-                                                     inspection_views=inspection_views)
+                                                     inspection_views=inspection_views, cell=cell)
         except Exception as e:
             print(f"[!!!] 판단 요청 생성 실패 - 원래 판독값({status})으로 진행: {e}")
             return status
@@ -544,16 +548,15 @@ class RobotAgent:
         request_id = req.get("id")
         self.awaiting_decision = True
         print(f"[대기] 병해충 의심({status}) 판단 요청 생성(id={request_id}) - 관리자 응답 대기...")
-        # 대시보드에 "WAIT"(관리자 승인 대기)로 표시되게 보고(실패해도 무시).
+        # 대시보드에 "WAIT"(관리자 승인 대기)로 표시되게 보고(실패해도 무시). 실제 cell을 싣는다.
         if self.cfg.aws_enabled and self.current_task is not None:
-            cur_cell = self.current_task.get("cell") if isinstance(self.current_task, dict) else None
             self.cloud_sync.try_send(
                 self.cloud.post_progress,
                 robot_id=self.cfg.robot_id,
                 task_id=self.current_task["id"],
-                target=f"cell_{cur_cell}" if cur_cell else None,
+                target=f"cell_{cell}" if cell else None,
                 state=STATE_VISION_READY,
-                progress=self._cell_progress_percent(cur_cell) if cur_cell else 0,
+                progress=self._cell_progress_percent(cell) if cell else 0,
                 action="WAIT",
             )
 

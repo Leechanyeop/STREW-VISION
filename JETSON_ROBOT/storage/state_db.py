@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS system_config (
 DEFAULT_CONFIG = {
     "confidence_threshold": "0.8",   # [예약] Early Stop/가변 View 도입 시 사용 (현재 미사용)
     "max_view": "4",                 # 촬영 View 수. Phase C 정책: TOP/LEFT/RIGHT/FRONT 고정 4장
-    "total_cells": "4",              # 한 Cycle의 전체 Cell 수. 진행도(%) 계산 기준(대시보드 조정 가능).
+    "total_cells": "4",              # 한 Cycle의 전체 Cell 수(고정 4). 진행도(%) 계산 기준.
+    "cycle_count": "0",              # 목표 사이클 횟수(1사이클=4셀 전체). 0이면 무한 반복.
 }
 
 
