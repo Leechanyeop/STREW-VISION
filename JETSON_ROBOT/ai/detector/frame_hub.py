@@ -27,7 +27,12 @@ class SharedFrameCamera:
 
     def __init__(self, cv2_module: Any, camera_index: int, frame_width: int, frame_height: int) -> None:
         self.cv2 = cv2_module
-        self.capture = self.cv2.VideoCapture(camera_index, self.cv2.CAP_V4L2)
+        # 일부 OpenCV 빌드(젯슨 등)는 VideoCapture(index, apiPreference) 2-인자 형태를 지원하지
+        # 않고 "takes at most 1 argument"로 죽는다. 2-인자를 먼저 시도하고, 실패하면 1-인자로 폴백한다.
+        try:
+            self.capture = self.cv2.VideoCapture(camera_index, self.cv2.CAP_V4L2)
+        except TypeError:
+            self.capture = self.cv2.VideoCapture(camera_index)
         self.capture.set(self.cv2.CAP_PROP_FRAME_WIDTH, frame_width)
         self.capture.set(self.cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
         if not self.capture.isOpened():
