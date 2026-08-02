@@ -125,11 +125,18 @@ class Config: #모든 설정값을 담는 Config 클래스입니다.
     yolo_model_path: str = os.getenv("YOLO_MODEL_PATH", "models/best.engine")
     # [2026-07-18] YOLOv8 추론 파라미터. 클래스 목록은 "모델을 학습시킨 순서"와 반드시
     # 일치해야 한다 - 다르게 학습했다면 .env의 YOLO_CLASS_NAMES로 콤마 구분 지정.
+    # [2026-08-02] 현재 best.engine은 2클래스 모델(output 1x6x8400 = 4box + 2class).
+    #   0: healthy, 1: powdery_mildew  (data.yaml names 기준).
+    #   -> 기본값을 실제 모델에 맞춰 2개로. (예전 4개로 두면 decode가 어긋나 confidence가
+    #      수백으로 튀고 가짜 검출 폭증으로 추론이 수십 초 걸림.)
+    #   다운스트림(status_to_task/aggregate_views/DISEASE_STATUSES)은 그대로 동작한다:
+    #      healthy->OBSERVE, powdery_mildew->REPLACE+관리자 승인. missing_plant/empty_cell은
+    #      모델에 없어 검출되지 않을 뿐, 4클래스로 재학습하면 .env로 되돌리면 된다.
     yolo_conf_threshold: float = float(os.getenv("YOLO_CONF_THRESHOLD", "0.4"))
     yolo_iou_threshold: float = float(os.getenv("YOLO_IOU_THRESHOLD", "0.45"))
     yolo_input_size: int = int(os.getenv("YOLO_INPUT_SIZE", "640"))
     yolo_class_names: tuple = tuple(
-        os.getenv("YOLO_CLASS_NAMES", "healthy,powdery_mildew,missing_plant,empty_cell").split(",")
+        os.getenv("YOLO_CLASS_NAMES", "healthy,powdery_mildew").split(",")
     )
 
 
