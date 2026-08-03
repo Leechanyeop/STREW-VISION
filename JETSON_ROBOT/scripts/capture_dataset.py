@@ -19,6 +19,8 @@ TIP(중요): 100장이 서로 비슷하면 학습에 도움이 안 된다. 촬�
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -38,6 +40,11 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=None, help="캡처 높이(기본: config)")
     ap.add_argument("--quality", type=int, default=95, help="JPEG 품질(1~100)")
     ap.add_argument("--warmup", type=float, default=2.0, help="첫 프레임 확보 대기(초)")
+    ap.add_argument("--send", default=None,
+                    help="촬영 후 전송할 대상. 예: user@192.168.0.10:/home/user/captures/  또는  192.168.0.10:/path")
+    ap.add_argument("--send-port", type=int, default=22, help="전송 SSH 포트(기본 22)")
+    ap.add_argument("--scp", action="store_true",
+                    help="rsync 대신 scp 강제(대상이 Windows PC면 필수 - Windows엔 rsync 없음)")
     args = ap.parse_args()
 
     import cv2
@@ -119,9 +126,37 @@ def main() -> int:
     print("\n=== 완료 ===")
     print("총 {}장 저장 -> {}".format(saved, out_dir.resolve()))
     print("파일 수 확인: ls {} | wc -l".format(out_dir))
-    print("\n다음 단계: PC로 복사 후 라벨링. 예)")
-    print("  scp -r blackhood@<젯슨IP>:{}/  \"C:\\\\VISION SOURCE\\\\raw_captures\\\\\"".format(out_dir.resolve()))
+
+    # 촬영 후 지정 IP로 전송 (--send)
+    if args.send and saved > 0:
+        rc = _upload(out_dir, args.send, args.send_port, args.scp)
+        if rc == 0:
+            print("[전송 완료] ->", args.send)
+        else:
+            print("[전송 실패] rc={} - 아래를 수동 실행하거나 SSH 키/경로 확인".format(rc))
+            print("  rsync -avz -e 'ssh -p {}' {}/ {}".format(args.send_port, out_dir.resolve(), args.send))
+    else:
+        print("\n전송하려면 --send 로 대상 지정. 예)")
+        print("  python3 scripts/capture_dataset.py --count 100 --prefix powdery \\")
+        print("      --send user@192.168.0.10:/home/user/captures/")
     return 0
+
+
+def _upload(out_dir, dest, port, force_scp=False):
+    """out_dir 내용물을 dest(user@host:/path)로 전송.
+    기본 rsync, 대상이 Windows면 rsync가 없으니 --scp(force_scp)로 scp 사용."""
+    src = str(out_dir).rstrip("/") + "/"   # 뒤 슬래시 = '폴더 내용물' 전송
+    if not force_scp and shutil.which("rsync"):
+        cmd = ["rsync", "-avz", "--progress", "-e", "ssh -p {}".format(port), src, dest]
+    else:
+        cmd = ["scp", "-P", str(port), "-r", src, dest]
+    print("\n[전송]", " ".join(cmd))
+    print("(비밀번호를 물으면 입력. 매번 자동으로 하려면 ssh-copy-id로 키 등록.)")
+    try:
+        return subprocess.call(cmd)
+    except FileNotFoundError as e:
+        print("전송 도구 없음:", e)
+        return 1
 
 
 if __name__ == "__main__":
