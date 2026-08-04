@@ -131,12 +131,22 @@ class SharedFrameCamera:
             return self._latest_frame.copy()
 
     def close(self) -> None:
+        # [2026-08-04] 종료 정리 강화 - nvargus가 센서를 확실히 해제하게 한다.
+        # (파이프라인을 NULL로 내리고 '전이 완료'까지 기다리지 않으면 프로세스가 먼저
+        #  죽어 카메라가 물린 채 남고, 다음 실행에서 NvArgusCameraSrc TIMEOUT이 난다.)
         self._running = False
         try:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
+        except Exception:
+            pass
+        try:
+            # 먼저 EOS를 흘려보내 하류를 정상 종료시킨 뒤 NULL로 내린다.
+            self._pipeline.send_event(self.Gst.Event.new_eos())
         except Exception:
             pass
         try:
             self._pipeline.set_state(self.Gst.State.NULL)
+            # NULL 전이 완료까지 대기(최대 3초) - Argus 센서 해제 보장.
+            self._pipeline.get_state(3 * self.Gst.SECOND)
         except Exception:
             pass

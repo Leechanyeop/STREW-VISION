@@ -1,7 +1,9 @@
-from config.settings import Config 
+import signal  # [2026-08-04] 종료 신호(SIGTERM/kill)를 받아 카메라/엔진을 깔끔히 닫기 위함.
+
+from config.settings import Config
 #프로그램에서 사용할 모든 설정값을 불러오는 역할
 #config/settings.py 파일에 있는 Config 클래스를 가져온다는 뜻입니다.
-from robot.state_machine import RobotAgent 
+from robot.state_machine import RobotAgent
 # robot/state_machine.py 안에 있는 RobotAgent 클래스를 가져온다는 뜻입니다.
 
 #RobotAgent는 보통
@@ -16,6 +18,15 @@ from robot.state_machine import RobotAgent
 def main() -> int: # main 함수는 프로그램의 시작점으로, 프로그램이 실행될 때 가장 먼저 호출되는 함수입니다.
     agent = RobotAgent(Config()) #Config()설정을 생성하고 RobotAgent에 전달합니다.
     #즉 Config 생성 -> RobotAgent 생성 -> RobotAgent 안에서 설정을 사용
+
+    # [2026-08-04] SIGTERM(kill)도 Ctrl+C(SIGINT)처럼 처리한다. run_forever()의 finally가
+    # self.close()로 카메라(nvargus)와 CUDA 컨텍스트를 정리하므로, 종료 신호에서 KeyboardInterrupt를
+    # 일으켜 그 정리가 반드시 돌게 한다. (이렇게 안 하면 kill 시 카메라가 물린 채 남아 다음 실행
+    # 때 NvArgusCameraSrc TIMEOUT이 난다. 단, kill -9는 OS가 잡을 수 없어 정리 불가.)
+    def _on_term(signum, frame):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, _on_term)
+
     agent.run_forever() #run_forever() 메서드는 RobotAgent가 무한 루프를 돌면서 계속해서 상태를 확인하고, 이벤트를 처리하며, 로봇의 동작을 제어하도록 합니다.
     return 0 #프로그램 정상 종료
 
