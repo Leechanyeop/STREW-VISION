@@ -42,12 +42,20 @@ def _infer_all(src, frame, np):
     canvas[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized
     chw = canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
 
-    np.copyto(src.host_inputs[0], chw.ravel().astype(src.host_inputs[0].dtype))
-    src.cuda.memcpy_htod_async(src.device_inputs[0], src.host_inputs[0], src.stream)
-    src.context.execute_async_v2(src.bindings, src.stream.handle)
-    for ho, do in zip(src.host_outputs, src.device_outputs):
-        src.cuda.memcpy_dtoh_async(ho, do, src.stream)
-    src.stream.synchronize()
+    # [fix] camera.py가 make_context로 만든 CUDA 컨텍스트를 push/pop 해서 사용(있을 때만).
+    _ctx = getattr(src, "cuda_ctx", None)
+    if _ctx is not None:
+        _ctx.push()
+    try:
+        np.copyto(src.host_inputs[0], chw.ravel().astype(src.host_inputs[0].dtype))
+        src.cuda.memcpy_htod_async(src.device_inputs[0], src.host_inputs[0], src.stream)
+        src.context.execute_async_v2(src.bindings, src.stream.handle)
+        for ho, do in zip(src.host_outputs, src.device_outputs):
+            src.cuda.memcpy_dtoh_async(ho, do, src.stream)
+        src.stream.synchronize()
+    finally:
+        if _ctx is not None:
+            _ctx.pop()
 
     nc = len(src.yolo_class_names)
     raw = np.asarray(src.host_outputs[0]).reshape(4 + nc, -1)

@@ -156,7 +156,7 @@ class RobotAgent:
                     status={
                         "jetson": "ONLINE",
                         "mega": "CONNECTED" if self.mega_online else "OFFLINE",
-                        "mqtt": "CONNECTED" if self.mqtt_client is not None else "DISCONNECTED",
+                        "mqtt": "CONNECTED" if getattr(self.mqtt_client, "connected", False) else "DISCONNECTED",
                         "state": state,
                         "heartbeat": time.strftime("%H:%M:%S") if self.mega_online else None,
                     },

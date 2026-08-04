@@ -65,10 +65,18 @@ class CsiCameraVisionSource(VisionSource):
         if self.yolo_model_path:
             import tensorrt as trt  # type: ignore
             import pycuda.driver as cuda  # type: ignore
-            import pycuda.autoinit  # type: ignore  # noqa: F401  (CUDA context를 현재 스레드에 자동 생성/등록)
 
             # read() 경로(_read_with_yolo)에서 memcpy/stream을 써야 하므로 모듈 참조를 보관.
             self.cuda = cuda
+
+            # [2026-08-04 fix] CUDA 컨텍스트는 "만든 스레드"에 묶인다. 엔진은 여기(RobotAgent가
+            # 도는 main 스레드)서 만들지만, 추론(read)은 UART 리스너 스레드에서 호출된다. 그래서
+            # pycuda.autoinit(현재 스레드에 컨텍스트 고정)를 쓰면 리스너 스레드의 execute에서
+            # 'Cuda Runtime (invalid resource handle)'가 난다. 명시적으로 컨텍스트를 만들어
+            # (여기서 current 상태로) 엔진/버퍼를 준비한 뒤 pop해서 떼어두고, 실제 추론 시점에
+            # 그 스레드에서 push/pop 하여 안전하게 사용한다.
+            cuda.init()
+            self.cuda_ctx = cuda.Device(0).make_context()
 
             try:
                 trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -110,6 +118,10 @@ class CsiCameraVisionSource(VisionSource):
                     else:
                         self.host_outputs.append(host_mem)
                         self.device_outputs.append(device_mem)
+
+                # [fix] 엔진/버퍼 준비 완료 - 컨텍스트를 현재(main) 스레드에서 떼어둔다.
+                # 실제 추론은 리스너 스레드가 _read_with_yolo에서 push/pop 하며 사용한다.
+                self.cuda_ctx.pop()
 
             except Exception as e:
                 # 저번 설계 리뷰 결론 그대로: 엔진 로딩/버퍼 할당 실패 시
@@ -187,13 +199,22 @@ class CsiCameraVisionSource(VisionSource):
         rgb = canvas[:, :, ::-1]                      # BGR -> RGB
         chw = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
 
-        # 2) 엔진 실행: host 입력 버퍼에 복사 -> GPU -> 추론 -> 출력 회수
-        np.copyto(self.host_inputs[0], chw.ravel().astype(self.host_inputs[0].dtype))
-        self.cuda.memcpy_htod_async(self.device_inputs[0], self.host_inputs[0], self.stream)
-        self.context.execute_async_v2(self.bindings, self.stream.handle)
-        for host_out, device_out in zip(self.host_outputs, self.device_outputs):
-            self.cuda.memcpy_dtoh_async(host_out, device_out, self.stream)
-        self.stream.synchronize()
+        # 2) 엔진 실행: host 입력 버퍼에 복사 -> GPU -> 추론 -> 출력 회수.
+        # [fix] 추론은 리스너 스레드에서 호출되므로, 이 스레드에서 CUDA 컨텍스트를 push/pop 한다.
+        # (cuda_ctx가 없는 경로 - autoinit로 엔진만 올린 테스트 스크립트 - 는 그대로 동작.)
+        _ctx = getattr(self, "cuda_ctx", None)
+        if _ctx is not None:
+            _ctx.push()
+        try:
+            np.copyto(self.host_inputs[0], chw.ravel().astype(self.host_inputs[0].dtype))
+            self.cuda.memcpy_htod_async(self.device_inputs[0], self.host_inputs[0], self.stream)
+            self.context.execute_async_v2(self.bindings, self.stream.handle)
+            for host_out, device_out in zip(self.host_outputs, self.device_outputs):
+                self.cuda.memcpy_dtoh_async(host_out, device_out, self.stream)
+            self.stream.synchronize()
+        finally:
+            if _ctx is not None:
+                _ctx.pop()
 
         # 3) 후처리: (4+nc, 8400) 디코드 -> NMS -> 최고 confidence 1개 -> 원본 좌표
         num_classes = len(self.yolo_class_names)
@@ -221,6 +242,14 @@ class CsiCameraVisionSource(VisionSource):
     # 카메라 닫음
     def close(self) -> None:
         self.shared_camera.close()
+        # [fix] make_context로 만든 CUDA 컨텍스트 정리(있을 때만). 실패는 무시.
+        ctx = getattr(self, "cuda_ctx", None)
+        if ctx is not None:
+            try:
+                ctx.push()
+                ctx.detach()
+            except Exception:
+                pass
 
     # [2026-07-16 추가] WebRTC publisher(robot/webrtc_publisher.py)가 병해충 의심
     # 판정으로 관리자 라이브 스트림을 열어야 할 때, YOLO 추론이 쓰는 것과 "같은"

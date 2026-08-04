@@ -12,7 +12,6 @@ class CloudClient:# AWS 클라우드 API와 통신하는 클라이언트 클래�
 
         # API 키와 콘텐츠 타입을 헤더에 추가합니다.
         self.session.headers.update({"X-API-Key": api_key, "Content-Type": "application/json"}) 
-        print("API =", api_key)
         self.timeout = timeout
 
     # next_task 메서드는 주어진 robot_id에 대한 다음 작업을 AWS 클라우드에서 가져옵니다.

@@ -15,6 +15,7 @@ def _make_client():
 class MqttClient:
     def __init__(self):
         self.client = _make_client()
+        self.connected = False
         self.emergency_stop_flag = False  # 긴급정지 상태를 나타내는 플래그
         self.topic = None  # connect()에서 실제 구독 토픽으로 채워짐
         # [2026-07-18] ESP32 센서 브리지: 센서 토픽과 수신 콜백. connect()에서
@@ -54,6 +55,14 @@ class MqttClient:
             except Exception as e:
                 print(f"OTA update callback error (ignored): {e}")
 
+    def on_connect(self, client, userdata, flags, rc):
+        self.connected = rc == 0
+        if not self.connected:
+            print(f"MQTT broker connection rejected: rc={rc}")
+
+    def on_disconnect(self, client, userdata, rc):
+        self.connected = False
+
     def connect(self, broker_address: str, topic: str, port: int = 1883,
                 sensor_topic: str = None, update_topic: str = None) -> None:
 
@@ -62,6 +71,8 @@ class MqttClient:
         self.update_topic = update_topic
         try:
             self.client.on_message = self.on_message  # 콜백 등록 (누락되어 있던 것 - 명시)
+            self.client.on_connect = self.on_connect
+            self.client.on_disconnect = self.on_disconnect
             self.client.connect(broker_address, port)
             self.client.subscribe(topic)
             for extra in (sensor_topic, update_topic):
@@ -71,6 +82,7 @@ class MqttClient:
             subs = [topic] + [t for t in (sensor_topic, update_topic) if t]
             print(f"Connected to MQTT broker at {broker_address}:{port}, subscribed: {subs}")
         except Exception as e:
+            self.connected = False
             print(f"Failed to connect to MQTT broker: {e}")
 
     # OTA/상태 보고용 publish 헬퍼.
