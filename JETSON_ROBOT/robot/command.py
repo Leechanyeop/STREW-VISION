@@ -50,12 +50,14 @@ TASK_OBSERVE = "OBSERVE"
 TASK_REPLACE = "REPLACE"
 TASK_SKIP = "SKIP"
 
-# vision.read()의 status -> TASK 매핑 (구 planner.py ACTION_MAP과 동일).
-# healthy -> OBSERVE, powdery_mildew/missing_plant -> REPLACE, 그 외 -> SKIP.
+# vision.read()의 status -> TASK 매핑.
+# [2026-08-04] 3클래스 모델(healthy_leaf/old_leaf/powdery_mildew) 기준.
+#   healthy_leaf -> OBSERVE(관찰), old_leaf -> REPLACE(교체), powdery_mildew -> REPLACE(교체).
+#   매핑에 없는 값은 SKIP.
 STATUS_TO_TASK = {
-    "healthy": TASK_OBSERVE,
+    "healthy_leaf": TASK_OBSERVE,
+    "old_leaf": TASK_REPLACE,
     "powdery_mildew": TASK_REPLACE,
-    "missing_plant": TASK_REPLACE,
 }
 
 
@@ -63,12 +65,12 @@ def status_to_task(status: str) -> str:
     return STATUS_TO_TASK.get(status, TASK_SKIP)
 
 
-# 우선순위: 병해충 > missing > empty > healthy. 이 순서로 낮은 값을 "더 심각"으로 본다.
+# 우선순위(심각도): powdery_mildew > old_leaf > healthy_leaf. 값이 작을수록 "더 심각".
+# aggregate_views가 여러 View 중 이 값이 가장 작은(심각한) status를 최종 채택한다.
 _STATUS_SEVERITY = {
     "powdery_mildew": 0,
-    "missing_plant": 1,
-    "empty_cell": 2,
-    "healthy": 3,
+    "old_leaf": 1,
+    "healthy_leaf": 2,
 }
 
 
@@ -83,14 +85,14 @@ def aggregate_views(view_results):
     반환: (final_status, best_confidence)
     """
     if not view_results:
-        return "healthy", 0.0
+        return "healthy_leaf", 0.0
     # 가장 심각한(severity 값이 작은) status 선택, 동률이면 confidence 높은 것.
     def key(r):
         sev = _STATUS_SEVERITY.get(r.get("status"), 99)
         conf = r.get("confidence") or 0.0
         return (sev, -conf)
     best = min(view_results, key=key)
-    final_status = best.get("status") or "healthy"
+    final_status = best.get("status") or "healthy_leaf"
     # 최종 status와 같은 View들 중 최고 confidence
     same = [r.get("confidence") or 0.0 for r in view_results if r.get("status") == final_status]
     return final_status, (max(same) if same else 0.0)

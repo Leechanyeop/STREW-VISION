@@ -30,7 +30,32 @@ class SharedFrameCamera:
 
     def __init__(self, cv2_module: Any, camera_index: int, frame_width: int, frame_height: int) -> None:
         self.cv2 = cv2_module
+        self._delegate = None   # RAW 백엔드일 때 RawCsiCamera로 위임
 
+        # [2026-08-04] 카메라 백엔드 선택.
+        # nvargus(Argus)가 이 IMX708에서 뿌옇게(소프트/저대비) 나와서, 기본을 RAW로 둔다:
+        #   RG10 Bayer를 v4l2-ctl로 직접 스트리밍받아 Python에서 ISP(black/WB/demosaic/gamma) 처리.
+        # 되돌리려면 CAMERA_BACKEND=nvargus. RAW 튜닝값은 RAW_* 환경변수로 조정(코드 무수정).
+        import os
+        if os.getenv("CAMERA_BACKEND", "raw").lower() == "raw":
+            from ai.detector.raw_camera import RawCsiCamera
+            _g = os.getenv("RAW_GAMMA")
+            self._delegate = RawCsiCamera(
+                device=os.getenv("RAW_DEVICE", "/dev/video{}".format(camera_index)),
+                width=int(os.getenv("RAW_WIDTH", str(self._SENSOR_W))),
+                height=int(os.getenv("RAW_HEIGHT", str(self._SENSOR_H))),
+                black=int(os.getenv("RAW_BLACK", "64")),
+                wb=tuple(float(x) for x in os.getenv("RAW_WB", "1.0,0.476,0.87").split(",")),
+                bayer=os.getenv("RAW_BAYER", "BG"),   # 이 IMX708 센서는 BGGR - BG가 정색
+                exposure=int(os.getenv("RAW_EXPOSURE", "45000")),
+                gain=int(os.getenv("RAW_GAIN", "64")),
+                scale=float(os.getenv("RAW_SCALE", "0.8")),
+                gamma=(float(_g) if _g else 0.6),
+            )
+            print("[frame_hub] 카메라 백엔드=RAW (v4l2 RG10 직접 처리)")
+            return
+
+        # ---- 이하 nvargus 경로 (CAMERA_BACKEND=nvargus) ----
         # 무거운/하드웨어 전용 모듈은 실제 카메라를 열 때만 import (mock/PC import 안전).
         import numpy as np
         import gi
@@ -125,12 +150,17 @@ class SharedFrameCamera:
 
     def get_latest_frame(self) -> Optional[Any]:
         """최신 프레임의 복사본 반환 (아직 한 장도 못 읽었으면 None). 반환은 BGR numpy 그대로."""
+        if self._delegate is not None:
+            return self._delegate.get_latest_frame()
         with self._lock:
             if self._latest_frame is None:
                 return None
             return self._latest_frame.copy()
 
     def close(self) -> None:
+        if self._delegate is not None:
+            self._delegate.close()
+            return
         # [2026-08-04] 종료 정리 강화 - nvargus가 센서를 확실히 해제하게 한다.
         # (파이프라인을 NULL로 내리고 '전이 완료'까지 기다리지 않으면 프로세스가 먼저
         #  죽어 카메라가 물린 채 남고, 다음 실행에서 NvArgusCameraSrc TIMEOUT이 난다.)

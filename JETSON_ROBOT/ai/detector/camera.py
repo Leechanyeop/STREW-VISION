@@ -1,8 +1,15 @@
 from ai.detector.result import VisionResult
 import os
 import random
+import threading
+import time
 
-_MOCK_STATUSES = ("healthy", "powdery_mildew", "missing_plant", "empty_cell")
+_MOCK_STATUSES = ("healthy_leaf", "old_leaf", "powdery_mildew")
+
+# 라이브 스트림 박스 색 (BGR). 클래스명 -> 색.
+_STREAM_COLORS = {"healthy_leaf": (0, 220, 0), "old_leaf": (0, 140, 255), "powdery_mildew": (0, 0, 255)}
+# 검사 프레임(박스) 을 이 초 이내면 스트림에 쓴다(넘으면 raw 라이브 프레임).
+_STREAM_ANNOT_TTL = 2.0
 
 #실제로쓰이는 실제 AI 파이프라인이다
 class VisionSource:
@@ -49,6 +56,12 @@ class CsiCameraVisionSource(VisionSource):
         # (자세한 이유는 ai/detector/frame_hub.py 모듈 docstring 참고.)
         self.shared_camera = SharedFrameCamera(cv2, camera_index, frame_width, frame_height)
         self.yolo_model_path = yolo_model_path
+
+        # [2026-08-04] 대시보드 라이브 스트림용: 마지막 '박스 그린' 검사 프레임 보관.
+        # 로봇이 View를 추론할 때마다 갱신되고, get_stream_frame()이 이걸 송출한다(엔진 재사용).
+        self._annot_lock = threading.Lock()
+        self._last_annotated = None
+        self._last_annotated_t = 0.0
 
         # tensorrt/pycuda는 여기서만(=yolo_model_path가 있을 때만) import한다.
         # cv2를 위에서 지역 import한 것과 같은 이유: 이 두 라이브러리는 젯슨/TensorRT가
@@ -100,6 +113,7 @@ class CsiCameraVisionSource(VisionSource):
                 self.device_inputs = []
                 self.device_outputs = []
                 self.bindings = []
+                self._out_shapes = []   # [2026-08-04] 출력 바인딩 shape 기록(검출/mask 구분용)
 
                 # [#18 리뷰 노트] get_binding_shape/binding_is_input/max_batch_size는
                 # TensorRT 8.5+에서 제거된 구식 API지만, Jetson Nano(JetPack 4.x)의
@@ -118,6 +132,25 @@ class CsiCameraVisionSource(VisionSource):
                     else:
                         self.host_outputs.append(host_mem)
                         self.device_outputs.append(device_mem)
+                        self._out_shapes.append(tuple(int(x) for x in self.engine.get_binding_shape(binding)))
+
+                # [2026-08-04] 출력 레이아웃/검출 바인딩 자동 판별.
+                #   v8 detection : (1, 4+nc, 8400)      -> decode_yolov8_output, reshape(4+nc, -1)
+                #   v5 / v5-seg  : (1, N, 5+nc[+32])    -> decode_yolov5_output, reshape(-1, W)
+                #   seg는 출력이 2개(검출+mask)라 검출 바인딩을 shape로 골라야 한다.
+                nc = len(self.yolo_class_names)
+                self._det_pos, self._det_w, self._det_layout = 0, 4 + nc, "v8"
+                for pos, shp in enumerate(self._out_shapes):
+                    last = shp[-1]
+                    mid = shp[1] if len(shp) >= 2 else -1
+                    if last in (5 + nc, 5 + nc + 32):          # v5 det 또는 v5-seg
+                        self._det_pos, self._det_w, self._det_layout = pos, last, "v5"
+                        break
+                    if mid == 4 + nc:                          # v8 (1, 4+nc, N)
+                        self._det_pos, self._det_w, self._det_layout = pos, 4 + nc, "v8"
+                        break
+                print("[camera] 출력 {}개, 검출 pos={} width={} layout={}".format(
+                    len(self._out_shapes), self._det_pos, self._det_w, self._det_layout))
 
                 # [fix] 엔진/버퍼 준비 완료 - 컨텍스트를 현재(main) 스레드에서 떼어둔다.
                 # 실제 추론은 리스너 스레드가 _read_with_yolo에서 push/pop 하며 사용한다.
@@ -182,6 +215,7 @@ class CsiCameraVisionSource(VisionSource):
         import numpy as np
         from ai.detector.yolo_postprocess import (
             best_detection_to_frame_coords,
+            decode_yolov5_output,
             decode_yolov8_output,
             letterbox_params,
             nms,
@@ -216,11 +250,22 @@ class CsiCameraVisionSource(VisionSource):
             if _ctx is not None:
                 _ctx.pop()
 
-        # 3) 후처리: (4+nc, 8400) 디코드 -> NMS -> 최고 confidence 1개 -> 원본 좌표
+        # 3) 후처리: 엔진 출력 레이아웃(v8 / v5-seg)에 맞춰 디코드 -> NMS -> 최고 conf 1개 -> 원본 좌표.
+        #    __init__에서 판별한 검출 바인딩 위치(_det_pos)/너비(_det_w)/레이아웃(_det_layout) 사용.
         num_classes = len(self.yolo_class_names)
-        raw = np.asarray(self.host_outputs[0]).reshape(4 + num_classes, -1)
-        detections = decode_yolov8_output(raw, num_classes, self.yolo_conf_threshold)
+        det = np.asarray(self.host_outputs[getattr(self, "_det_pos", 0)])
+        if getattr(self, "_det_layout", "v8") == "v5":
+            raw = det.reshape(-1, self._det_w)                 # (N, 5+nc[+32])
+            detections = decode_yolov5_output(raw, num_classes, self.yolo_conf_threshold)
+        else:
+            raw = det.reshape(4 + num_classes, -1)             # (4+nc, 8400)
+            detections = decode_yolov8_output(raw, num_classes, self.yolo_conf_threshold)
         kept = nms(detections, self.yolo_iou_threshold)
+        # [stream] 이번 검사의 모든 박스를 그린 프레임을 보관(대시보드 라이브 스트림용, 추론 재사용).
+        try:
+            self._store_annotated(frame, kept, frame_w, frame_h, s)
+        except Exception:
+            pass
         best = best_detection_to_frame_coords(kept, frame_w, frame_h, s)
         if best is None:
             return VisionResult(label=None)
@@ -238,6 +283,31 @@ class CsiCameraVisionSource(VisionSource):
             # status에 그대로 넣는다 - planner가 이 값으로 판단요청 여부를 결정한다.
             status=class_name,
         )
+
+    # [2026-08-04] 검사 시 나온 모든 박스를 프레임에 그려 보관(라이브 스트림 송출용).
+    def _store_annotated(self, frame, kept, frame_w, frame_h, s) -> None:
+        from ai.detector.yolo_postprocess import letterbox_params
+        scale, pad_x, pad_y = letterbox_params(frame_w, frame_h, s)
+        out = frame.copy()
+        nc = len(self.yolo_class_names)
+        for conf, cls, cx, cy, w, h in kept:
+            x1 = int((cx - w / 2 - pad_x) / scale); y1 = int((cy - h / 2 - pad_y) / scale)
+            x2 = int((cx + w / 2 - pad_x) / scale); y2 = int((cy + h / 2 - pad_y) / scale)
+            name = self.yolo_class_names[cls] if 0 <= cls < nc else str(cls)
+            col = _STREAM_COLORS.get(name, (0, 220, 0))
+            self.cv2.rectangle(out, (x1, y1), (x2, y2), col, 2)
+            self.cv2.putText(out, "%s %.2f" % (name, conf), (x1, max(20, y1 - 5)),
+                             self.cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
+        with self._annot_lock:
+            self._last_annotated = out
+            self._last_annotated_t = time.monotonic()
+
+    # 라이브 스트림용 프레임: 최근 검사(박스)가 신선하면 그걸, 아니면 raw 라이브 프레임.
+    def get_stream_frame(self):
+        with self._annot_lock:
+            if self._last_annotated is not None and (time.monotonic() - self._last_annotated_t) < _STREAM_ANNOT_TTL:
+                return self._last_annotated.copy()
+        return self.shared_camera.get_latest_frame()
 
     # 카메라 닫음
     def close(self) -> None:

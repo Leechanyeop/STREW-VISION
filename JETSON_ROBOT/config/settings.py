@@ -135,8 +135,11 @@ class Config: #모든 설정값을 담는 Config 클래스입니다.
     yolo_conf_threshold: float = float(os.getenv("YOLO_CONF_THRESHOLD", "0.4"))
     yolo_iou_threshold: float = float(os.getenv("YOLO_IOU_THRESHOLD", "0.45"))
     yolo_input_size: int = int(os.getenv("YOLO_INPUT_SIZE", "640"))
+    # [2026-08-04] 3클래스 모델로 교체 (Roboflow strawberry-leaf-cdtb0, nc=3).
+    #   0: healthy_leaf, 1: old_leaf, 2: powdery_mildew  (data.yaml names 순서와 동일해야 함)
+    #   출력 텐서: v8 레이아웃이면 1x7x8400 (4box + 3class). num_classes=3.
     yolo_class_names: tuple = tuple(
-        os.getenv("YOLO_CLASS_NAMES", "healthy,powdery_mildew").split(",")
+        os.getenv("YOLO_CLASS_NAMES", "healthy_leaf,old_leaf,powdery_mildew").split(",")
     )
 
 

@@ -184,7 +184,16 @@ long sendStateWithView(int cell, const char* state, const char* view) {
 void showMessage(const char* l1, const char* l2) {
   lcd.clear(); lcd.setCursor(0, 0); lcd.print(l1); lcd.setCursor(0, 1); lcd.print(l2);
 }
+#else
+void showMessage(const char* l1, const char* l2) {}   // LCD 미사용 시 no-op
 #endif
+
+// [2026-08-04] 현재 셀/상태를 LCD에 표시. 윗줄 "Cell X/N", 아랫줄 상태 문자열.
+void lcdStatus(const char* state) {
+  char l1[17];
+  snprintf(l1, sizeof(l1), "Cell %d/%d", currentCell, TOTAL_CELLS);
+  showMessage(l1, state);
+}
 
 // ============================================================================
 // 물리 동작 placeholder (실제 배선 전까지 아무 동작 안 함)
@@ -216,6 +225,7 @@ void runCycleStep() {
   switch (cycleStep) {
     case CS_MOVE_TO_CELL:
       moveToCell(currentCell);
+      lcdStatus("MOVE");                 // LCD: Cell X/N / MOVE
       pendingSeq = sendState(currentCell, STATE_MOVE_CELL);
       cycleStep = CS_WAIT_MOVE_ACK;
       break;
@@ -233,6 +243,8 @@ void runCycleStep() {
       const char* view = INSPECTION_VIEWS[currentViewIndex];
       moveToView(view);
       positionCamera();
+      char l2[17]; snprintf(l2, sizeof(l2), "VIEW:%s", view);
+      lcdStatus(l2);                     // LCD: Cell X/N / VIEW:TOP
       taskReceived = false;
       pendingSeq = sendStateWithView(currentCell, STATE_VISION_READY, view);
       cycleStep = CS_WAIT_VIEW_ACK;
@@ -249,6 +261,9 @@ void runCycleStep() {
           cycleStep = CS_MOVE_TO_VIEW;
         } else if (taskReceived) {
           // 마지막 View + TASK 도착 -> 물리 동작.
+          const char* tn = (currentExecuteTask == TASK_OBSERVE) ? "TASK:OBSERVE"
+                         : (currentExecuteTask == TASK_REPLACE) ? "TASK:REPLACE" : "TASK:SKIP";
+          lcdStatus(tn);                 // LCD: Cell X/N / TASK:REPLACE
           actionStartMs = millis();
           cycleStep = CS_EXECUTE_ACTION;
         }
@@ -271,6 +286,7 @@ void runCycleStep() {
       break;
 
     case CS_ADVANCE:
+      lcdStatus("DONE");                 // LCD: Cell X/N / DONE
       sendComplete();  // 이 셀 완료 통보 (COMPLETE는 ACK 불필요)
       // [2026-07-25 Phase B] EEPROM 저장 제거. 진행 상태는 Jetson SQLite가 관리한다.
       if (currentCell >= TOTAL_CELLS) {
@@ -278,6 +294,7 @@ void runCycleStep() {
         megaMode = MODE_IDLE;
         currentCell = 1;
         cycleStep = CS_MOVE_TO_CELL;
+        showMessage("STREW   IDLE", "wait RUN");   // 사이클 끝 -> RUN 대기
       } else {
         currentCell++;
         cycleStep = CS_MOVE_TO_CELL;

@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 from typing import Any, Dict, Optional
@@ -58,6 +59,19 @@ class RobotAgent:
         self.vision = create_vision_source(
             cfg.vision_mode, cfg.csi_camera_index, cfg.frame_width, cfg.frame_height, cfg.yolo_model_path,
         )
+
+        # [2026-08-04] 대시보드 라이브 스트림(MJPEG) - 로봇 검사 카메라(SharedFrameCamera)를 그대로
+        # 공유해 송출한다(별도 프로세스 X - 카메라 단일 소유 충돌 방지). 검사 시 나온 박스가 얹힌다.
+        # mock 모드엔 get_stream_frame이 없어 자동 스킵. STREAM_ENABLED=false 로 끌 수 있음.
+        self.stream_server = None
+        if os.getenv("STREAM_ENABLED", "true").lower() in ("1", "true", "yes") and hasattr(self.vision, "get_stream_frame"):
+            try:
+                from robot.vision_stream import VisionStreamServer
+                self.stream_server = VisionStreamServer(
+                    self.vision.get_stream_frame, port=int(os.getenv("STREAM_PORT", "8090")))
+            except Exception as e:
+                print(f"[stream] 시작 실패(무시하고 계속): {e}")
+
         self.arduino = ArduinoLink(cfg.arduino_port, cfg.arduino_baudrate)
         self.mqtt_client = MqttClient()
         self.cloud_sync = CloudSync(self.cloud)
@@ -603,6 +617,11 @@ class RobotAgent:
             self.close()
 
     def close(self) -> None:
+        try:
+            if getattr(self, "stream_server", None) is not None:
+                self.stream_server.close()
+        except Exception:
+            pass
         try:
             self.arduino.close()
         except Exception:

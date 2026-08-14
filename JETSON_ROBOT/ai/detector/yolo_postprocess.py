@@ -95,3 +95,30 @@ def best_detection_to_frame_coords(
     fx = min(max(fx, 0), frame_w)
     fy = min(max(fy, 0), frame_h)
     return conf, cls, int(round(fx)), int(round(fy)), int(round(fw)), int(round(fh))
+
+
+def decode_yolov5_output(raw: np.ndarray, num_classes: int, conf_threshold: float):
+    """[2026-08-04] YOLOv5 / YOLOv5-seg 출력 디코드.
+
+    입력 arr은 (N, W) 형태여야 한다(caller가 reshape(-1, W)). W = 5 + nc [+ 32 mask].
+        열 0~3 : cx, cy, w, h (입력 640 기준)
+        열 4   : objectness
+        열 5~  : 클래스 score (nc개). 그 뒤 mask 계수(seg)는 무시.
+    v8과의 결정적 차이: objectness가 있고, 진짜 conf = obj * class_score.
+    반환: [(conf, class_id, cx, cy, w, h), ...] (decode_yolov8_output과 동일 포맷).
+    """
+    arr = np.asarray(raw, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]
+    boxes = arr[:, :4]
+    obj = arr[:, 4]
+    cls = arr[:, 5:5 + num_classes]
+    class_ids = np.argmax(cls, axis=1)
+    confidences = obj * cls[np.arange(cls.shape[0]), class_ids]
+
+    keep = confidences >= conf_threshold
+    result = []
+    for i in np.flatnonzero(keep):
+        cx, cy, w, h = boxes[i]
+        result.append((float(confidences[i]), int(class_ids[i]), float(cx), float(cy), float(w), float(h)))
+    return result
