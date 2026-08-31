@@ -19,10 +19,10 @@
   ============================================================================
   *** 실제 하드웨어 배선 전 반드시 채워야 할 placeholder (변경 없음) ***
   ============================================================================
-  moveToCell/returnToHome/positionCamera/performInspection/pick*/drop*/place* 및
-  checkForHardwareFault()는 실제 배선 전까지 시간만 흉내내는 자리표시자다.
-  ============================================================================
-*/
+ // moveToCell/returnToHome/positionCamera/performInspection/pick*///drop/place 및
+ //checkForHardwareFault()는 실제 배선 전까지 시간만 흉내내는 자리표시자다.
+  //============================================================================
+
 
 #include <ArduinoJson.h>
 // [2026-07-25 Phase B] EEPROM 제거. 복구 상태는 Jetson SQLite가 관리한다(Source of Truth).

@@ -49,8 +49,8 @@ bool waitingVision = false;
 void sendJson(JsonDocument& doc)
 {
      serializeJson(doc, Serial);
-    Serial.write('\n');
-    Serial.flush();
+    Serial1.write('\n');
+    Serial1.flush();
 }
 
 

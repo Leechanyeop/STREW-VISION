@@ -15,18 +15,39 @@ import threading
 import numpy as np
 
 
+def set_focus(bus, value):
+    """ArduCam IMX708 VCM(0x0C) 고정 초점 설정. value 0..1000 (0=원거리, 1000=근접).
+
+    ArduCam Focuser 프로토콜: value(0..1000)->12bit(0..4095)<<4 후 reg0x00(상위)/0x01(하위)에 기록.
+    i2c-tools(i2cset) 필요. 실패는 무시(초점 미지원/버스 오류 시에도 스트림은 계속).
+    """
+    value = max(0, min(1000, int(value)))
+    v = int(value / 1000.0 * 4095) << 4
+    for args in (["0x02", "0x00"],
+                 ["0x00", "0x%02x" % ((v >> 8) & 0xFF)],
+                 ["0x01", "0x%02x" % (v & 0xFF)]):
+        try:
+            subprocess.call(["i2cset", "-y", str(bus), "0x0c"] + args, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
 class RawCsiCamera:
     """v4l2-ctl RG10 스트리밍 + RAW->BGR 백그라운드 스레드. get_latest_frame()로 최신 BGR 복사본."""
 
     def __init__(self, device="/dev/video0", width=1536, height=864,
                  black=64, wb=(1.0, 0.476, 0.87), bayer="BG",
-                 exposure=45000, gain=64, scale=0.8, gamma=0.6):
+                 exposure=3000, gain=16, scale=0.8, gamma=0.6, sensor_mode=2,
+                 focus=None, i2c_bus=7, crop=1.0):
         import cv2
         self.cv2 = cv2
         self.W, self.H = width, height
         self.black = float(black)
         self.scale = float(scale)
         self.gamma = gamma
+        # [2026-08-14] 중앙 크롭 비율(0<crop<=1). 150° 초광각이라 검사 각이 너무 넓을 때
+        # 중앙만 남겨 화각을 좁히고 대상을 확대한다. crop=0.5 -> 가로·세로 중앙 50%만 사용.
+        self.crop = max(0.05, min(1.0, float(crop)))
         self._frame_bytes = width * height * 2   # RG10 = 16bit 컨테이너/픽셀
         self._bayer_code = {
             "RG": cv2.COLOR_BayerRG2BGR, "GB": cv2.COLOR_BayerGB2BGR,
@@ -41,18 +62,25 @@ class RawCsiCamera:
         if gamma:
             self._lut = (np.power(np.arange(256) / 255.0, gamma) * 255).astype(np.uint8)
 
-        # 노출/게인 설정(있으면 - 실패 무시). 스트리밍 시작 전에.
-        for ctrl in ("exposure=%d" % exposure, "gain=%d" % gain):
-            try:
-                subprocess.call(["v4l2-ctl", "-d", device, "--set-ctrl", ctrl],
-                                stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
-
+        # [2026-08-14] 순서가 중요하다: sensor_mode -> set-fmt -> exposure/gain -> stream.
+        # 이유(실측): (1) sensor_mode를 안 박으면 센서가 mode0(4608x2592)을 뱉어, 우리가
+        #   width*height*2 만큼만 읽으면 프레임이 어긋나 '가로 밴딩'이 생긴다.
+        #   sensor_mode=2 == 1536x864@90 (0:4608 / 1:2304 / 2:1536).
+        # (2) 모드/포맷을 바꾸면 노출이 초기화되므로 exposure/gain은 set-fmt '이후',
+        #   스트리밍 직전에 같은 명령 안에서 건다(앞서 걸면 리셋돼 과다노출로 포화된다).
         cmd = ["v4l2-ctl", "-d", device,
+               "--set-ctrl", "sensor_mode=%d" % sensor_mode,
                "--set-fmt-video=width=%d,height=%d,pixelformat=RG10" % (width, height),
+               "--set-ctrl", "exposure=%d,gain=%d" % (exposure, gain),
                "--stream-mmap", "--stream-count=0", "--stream-to=-"]
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+
+        # [2026-08-14] 고정 초점(선택). IMX708은 오토포커스(VCM) 렌즈지만 tegracam 드라이버가
+        # v4l2 focus 컨트롤을 안 내보내, ArduCam VCM(I2C 0x0C, 버스=i2c_bus)에 직접 값을 쓴다.
+        # focus 0..1000 (0=원거리/무한대, 1000=근접). 검사 거리(예: 30cm)에 맞는 값으로 고정.
+        # 오토포커스 헌팅 없이 항상 같은 거리에 초점이 맞아 검사에 유리하다. (값은 focus_sweep.py로 탐색)
+        if focus is not None:
+            set_focus(i2c_bus, focus)
 
         self._lock = threading.Lock()
         self._latest = None
@@ -92,6 +120,11 @@ class RawCsiCamera:
         bgr = self.cv2.cvtColor(m8, self._bayer_code)   # Demosaic
         if self._lut is not None:
             bgr = self.cv2.LUT(bgr, self._lut)     # gamma (학습 도메인 매칭용)
+        if self.crop < 1.0:                        # 중앙 크롭 -> 화각 좁힘/확대
+            h, w = bgr.shape[:2]
+            ch, cw = int(h * self.crop), int(w * self.crop)
+            y0, x0 = (h - ch) // 2, (w - cw) // 2
+            bgr = bgr[y0:y0 + ch, x0:x0 + cw]
         return bgr
 
     def get_latest_frame(self):

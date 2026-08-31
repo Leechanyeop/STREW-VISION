@@ -47,10 +47,14 @@ class SharedFrameCamera:
                 black=int(os.getenv("RAW_BLACK", "64")),
                 wb=tuple(float(x) for x in os.getenv("RAW_WB", "1.0,0.476,0.87").split(",")),
                 bayer=os.getenv("RAW_BAYER", "BG"),   # 이 IMX708 센서는 BGGR - BG가 정색
-                exposure=int(os.getenv("RAW_EXPOSURE", "45000")),
-                gain=int(os.getenv("RAW_GAIN", "64")),
+                exposure=int(os.getenv("RAW_EXPOSURE", "3000")),
+                gain=int(os.getenv("RAW_GAIN", "16")),
                 scale=float(os.getenv("RAW_SCALE", "0.8")),
                 gamma=(float(_g) if _g else 0.6),
+                sensor_mode=int(os.getenv("RAW_SENSOR_MODE", "2")),  # 2=1536x864@90 (0:4608/1:2304)
+                focus=(int(os.getenv("RAW_FOCUS")) if os.getenv("RAW_FOCUS") else None),  # 0..1000 고정초점(미설정=안 건드림)
+                i2c_bus=int(os.getenv("RAW_I2C_BUS", "7")),
+                crop=float(os.getenv("RAW_CROP", "1.0")),  # 중앙 크롭 비율(1.0=전체, 0.5=중앙 50%로 화각 좁힘)
             )
             print("[frame_hub] 카메라 백엔드=RAW (v4l2 RG10 직접 처리)")
             return

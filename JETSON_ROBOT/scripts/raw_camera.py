@@ -23,9 +23,11 @@ def main():
     ap.add_argument("--height", type=int, default=864)
     ap.add_argument("--black", type=int, default=64)
     ap.add_argument("--wb", type=float, nargs=3, default=[1.0, 0.476, 0.87], metavar=("R", "G", "B"))
-    ap.add_argument("--bayer", default="RG", choices=["RG", "GB", "GR", "BG"])
-    ap.add_argument("--exposure", type=int, default=45000)
-    ap.add_argument("--gain", type=int, default=64)
+    ap.add_argument("--bayer", default="BG", choices=["RG", "GB", "GR", "BG"])
+    ap.add_argument("--exposure", type=int, default=3000)
+    ap.add_argument("--gain", type=int, default=16)
+    ap.add_argument("--sensor-mode", type=int, default=2, help="0:4608x2592 / 1:2304x1296 / 2:1536x864")
+    ap.add_argument("--crop", type=float, default=1.0, help="중앙 크롭 비율(1.0=전체, 0.5=중앙 50%로 화각 좁힘)")
     ap.add_argument("--scale", type=float, default=0.8)
     ap.add_argument("--gamma", type=float, default=0.6)
     ap.add_argument("--save", default=None, help="이 폴더에 프레임 저장(헤드리스)")
@@ -34,7 +36,8 @@ def main():
 
     import cv2
     cam = RawCsiCamera(args.device, args.width, args.height, args.black, tuple(args.wb),
-                       args.bayer, args.exposure, args.gain, args.scale, args.gamma)
+                       args.bayer, args.exposure, args.gain, args.scale, args.gamma,
+                       sensor_mode=args.sensor_mode, crop=args.crop)
     save_dir = None
     if args.save:
         save_dir = Path(args.save); save_dir.mkdir(parents=True, exist_ok=True)
